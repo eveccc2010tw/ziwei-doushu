@@ -7,3 +7,7 @@ dist/
 *.tsbuildinfo
 .DS_Store
 node_modules
+
+# Auto-assembled local SQLite dataset (chunks are tracked as .part-*)
+/data/ziwei-v4.sqlite
+/data/ziwei-v4.sqlite.tmp*

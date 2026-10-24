@@ -1,12 +1,12 @@
-// /api/heming — 合盘 AI 分析后端（开源版未含），上游同 /api/interpret。
+// /api/heming — 合盘 AI 分析后端，上游同 /api/interpret。
 // 契约（app/heming/page.tsx）：
 //   POST { chartA, chartB, question? } → SSE `data: {"delta":{"text":…}}` … `data: [DONE]`
 import { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
 
-const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.runinfra.ai/v1';
-const MODEL = process.env.INTERPRET_MODEL || 'glm-5-3-flash';
+const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.openai.com/v1';
+const MODEL = process.env.INTERPRET_MODEL || 'gpt-4o-mini';
 const EFFORT = process.env.INTERPRET_EFFORT || 'low';
 
 const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）合盘分析助手。
@@ -39,8 +39,8 @@ export async function POST(req: NextRequest) {
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${key}`,
-      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://fate.asources.com',
-      'X-Title': 'fate-ziwei',
+      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
+      'X-Title': 'ziwei-doushu',
     },
     body: JSON.stringify({
       model: MODEL,
@@ -60,7 +60,6 @@ export async function POST(req: NextRequest) {
   });
   if (!upstream.ok || !upstream.body) return new Response(`upstream ${upstream.status}`, { status: 502 });
 
-  // push-based 串流（同 /api/interpret；pull 模式在 Node 会卡）
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();

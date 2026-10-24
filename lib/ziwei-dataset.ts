@@ -48,7 +48,39 @@ const SLOTS_PER_MONTH = 31 * 24;
 const HEADER_OFFSET_BYTES = (SLOTS_PER_MONTH + 1) * 4;
 
 const DATA_DIR = process.env.ZIWEI_DATA_DIR || '/opt/fate-data/ziwei-interp-v4';
-const SQLITE_PATH = process.env.ZIWEI_SQLITE_PATH || path.join(DATA_DIR, 'ziwei-v4.sqlite');
+const DEFAULT_OPT_SQLITE = path.join(DATA_DIR, 'ziwei-v4.sqlite');
+const LOCAL_DATA_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), 'data');
+const LOCAL_SQLITE = path.join(/*turbopackIgnore: true*/ LOCAL_DATA_DIR, 'ziwei-v4.sqlite');
+
+export function resolveDefaultSqlitePath(): string {
+  if (process.env.ZIWEI_SQLITE_PATH) return process.env.ZIWEI_SQLITE_PATH;
+  if (fs.existsSync(/*turbopackIgnore: true*/ DEFAULT_OPT_SQLITE)) return DEFAULT_OPT_SQLITE;
+  if (fs.existsSync(/*turbopackIgnore: true*/ LOCAL_SQLITE)) return LOCAL_SQLITE;
+
+  // Auto-assemble from split chunks in ./data/ziwei-v4.sqlite.part-* on first use
+  const firstPart = path.join(/*turbopackIgnore: true*/ LOCAL_DATA_DIR, 'ziwei-v4.sqlite.part-aa');
+  if (fs.existsSync(/*turbopackIgnore: true*/ firstPart)) {
+    const parts = fs
+      .readdirSync(/*turbopackIgnore: true*/ LOCAL_DATA_DIR)
+      .filter((f) => f.startsWith('ziwei-v4.sqlite.part-'))
+      .sort();
+    if (parts.length > 0) {
+      const tmp = `${LOCAL_SQLITE}.tmp.${process.pid}`;
+      const fd = fs.openSync(/*turbopackIgnore: true*/ tmp, 'w');
+      try {
+        for (const p of parts) {
+          const buf = fs.readFileSync(/*turbopackIgnore: true*/ path.join(LOCAL_DATA_DIR, p));
+          fs.writeFileSync(fd, buf);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(/*turbopackIgnore: true*/ tmp, /*turbopackIgnore: true*/ LOCAL_SQLITE);
+      return LOCAL_SQLITE;
+    }
+  }
+  return DEFAULT_OPT_SQLITE;
+}
 
 // LRU Caches
 const yearDictCache = new Map<number, string[]>();
@@ -97,9 +129,10 @@ let cachedDb: DatabaseSync | null = null;
 let cachedDbMtime = 0;
 
 function getSqliteDb(customPath?: string): DatabaseSync | null {
-  const target = customPath || SQLITE_PATH;
+  const defaultPath = resolveDefaultSqlitePath();
+  const target = customPath || defaultPath;
   if (!fs.existsSync(/*turbopackIgnore: true*/ target)) return null;
-  if (customPath && customPath !== SQLITE_PATH) {
+  if (customPath && customPath !== defaultPath) {
     return new DatabaseSync(target, { readOnly: true });
   }
   const stat = fs.statSync(/*turbopackIgnore: true*/ target);
@@ -118,10 +151,12 @@ export function lookupFromSqlite(
   options?: { sqlitePath?: string; bypassCache?: boolean }
 ): DatasetReadingRecord | null {
   const t0 = performance.now();
+  const defaultPath = resolveDefaultSqlitePath();
+  const isCustomDb = Boolean(options?.sqlitePath && options.sqlitePath !== defaultPath);
   const db = getSqliteDb(options?.sqlitePath);
   if (!db) return null;
 
-  const useCache = !options?.sqlitePath && !options?.bypassCache;
+  const useCache = !isCustomDb && !options?.bypassCache;
   const monthKey = `${parts.y}-${String(parts.m).padStart(2, '0')}`;
 
   try {
@@ -198,7 +233,7 @@ export function lookupFromSqlite(
       },
     };
   } finally {
-    if (options?.sqlitePath && options.sqlitePath !== SQLITE_PATH) {
+    if (isCustomDb) {
       try { db.close(); } catch { /* ignore */ }
     }
   }
@@ -279,7 +314,7 @@ export async function getDatasetReading(
 }
 
 export function getDatasetStats(customSqlitePath?: string) {
-  const sqliteTarget = customSqlitePath || SQLITE_PATH;
+  const sqliteTarget = customSqlitePath || resolveDefaultSqlitePath();
   const hasSqlite = fs.existsSync(/*turbopackIgnore: true*/ sqliteTarget);
   let sqliteSizeMB = 0;
   let indexedYears = 0;
@@ -295,7 +330,7 @@ export function getDatasetStats(customSqlitePath?: string) {
         indexedYears = yRow?.cnt ?? 0;
         totalCharts = cRow?.cnt ?? 0;
       } finally {
-        if (customSqlitePath && customSqlitePath !== SQLITE_PATH) {
+        if (customSqlitePath) {
           try { db.close(); } catch { /* ignore */ }
         }
       }

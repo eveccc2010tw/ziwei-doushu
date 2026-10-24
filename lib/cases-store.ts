@@ -26,7 +26,7 @@ function lock<T>(fn: () => Promise<T>): Promise<T> {
 
 async function readAll(): Promise<CaseEntry[]> {
   try {
-    const raw = await fs.readFile(FILE, 'utf8');
+    const raw = await fs.readFile(/*turbopackIgnore: true*/ FILE, 'utf8');
     const j = JSON.parse(raw);
     return Array.isArray(j.cases) ? j.cases : [];
   } catch {
@@ -35,10 +35,10 @@ async function readAll(): Promise<CaseEntry[]> {
 }
 
 async function writeAll(cases: CaseEntry[]): Promise<void> {
-  await fs.mkdir(path.dirname(FILE), { recursive: true });
+  await fs.mkdir(/*turbopackIgnore: true*/ path.dirname(FILE), { recursive: true });
   const tmp = FILE + '.tmp';
-  await fs.writeFile(tmp, JSON.stringify({ cases }, null, 2), 'utf8');
-  await fs.rename(tmp, FILE);
+  await fs.writeFile(/*turbopackIgnore: true*/ tmp, JSON.stringify({ cases }, null, 2), 'utf8');
+  await fs.rename(/*turbopackIgnore: true*/ tmp, /*turbopackIgnore: true*/ FILE);
 }
 
 export function listCases(): Promise<CaseEntry[]> {
@@ -71,9 +71,11 @@ export function saveCase(input: { id?: string; name: string; note?: string; form
   });
 }
 
-export function deleteCase(id: string): Promise<void> {
+export function deleteCase(id: string): Promise<CaseEntry[]> {
   return lock(async () => {
     const cases = await readAll();
-    await writeAll(cases.filter((c) => c.id !== id));
+    const filtered = cases.filter((c) => c.id !== id);
+    await writeAll(filtered);
+    return filtered;
   });
 }

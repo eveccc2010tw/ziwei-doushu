@@ -1,4 +1,4 @@
-// /api/interpret — 开源版未含的 AI 解读后端，接 OpenAI 兼容上游（env 可换供应商）。
+// /api/interpret — AI 解读后端，接 OpenAI 兼容上游（env 可换供应商）。
 // 契约（components/ChatPanel.tsx / InsightPanel.tsx）：
 //   POST { chart, messages:[{role,content}] } → SSE `data: {"delta":{"text":…}}` … `data: [DONE]`
 import { NextRequest } from 'next/server';
@@ -6,9 +6,9 @@ import { formatDatasetKey, getDatasetReading } from '@/lib/ziwei-dataset';
 
 export const runtime = 'nodejs';
 
-const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.runinfra.ai/v1';
-const MODEL = process.env.INTERPRET_MODEL || 'glm-5-3-flash';
-const EFFORT = process.env.INTERPRET_EFFORT || 'low'; // RunInfra glm-5-3-flash 默认 reasoning 爆 token；low 实测 6s 完整作答
+const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.openai.com/v1';
+const MODEL = process.env.INTERPRET_MODEL || 'gpt-4o-mini';
+const EFFORT = process.env.INTERPRET_EFFORT || 'low';
 
 const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）命盘解读助手。
 规则：
@@ -83,7 +83,7 @@ function proxyStream(upstream: Response): Response {
           controller.close();
         } catch { /* already closed */ }
       };
-      send(': connected\n\n'); // SSE comment：headers 立刻下发；前端解析器会跳过非 data: 行
+      send(': connected\n\n');
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -139,8 +139,8 @@ export async function POST(req: NextRequest) {
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${key}`,
-      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://fate.asources.com',
-      'X-Title': 'fate-ziwei',
+      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
+      'X-Title': 'ziwei-doushu',
     },
     body: JSON.stringify({
       model: MODEL,
