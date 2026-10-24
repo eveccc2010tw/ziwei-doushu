@@ -1,4 +1,5 @@
 # 紫微斗數 · 繁體中文輕量排盤與 13 維詳批系統
+> **Purple Star Astrology / Tzu Wei Tou Shu (ZWDS)** — `osslab-ziWei-douShu`
 
 這是一套免費、開源、全繁體中文的紫微斗數排盤網站（倪海廈《天紀》體系）。輸入出生年月日時，瀏覽器馬上排出十二宮命盤，同時直接調出 1950–2026 年共 67.5 萬張命盤的 13 維度完整文字詳批（每張盤約 3 萬字），不用花錢買點數，也不用綁任何 AI Key。
 
@@ -63,8 +64,8 @@
 環境需求：**Node.js 22+**（使用了 Node 22 內建的 `node:sqlite` 與 `node:zlib` Zstd 支援）及系統 `zstd` 指令。
 
 ```bash
-git clone https://github.com/thx0701/ziwei-doushu.git
-cd ziwei-doushu
+git clone https://github.com/thx0701/osslab-ziWei-douShu.git
+cd osslab-ziWei-douShu
 npm install
 
 # 複製環境變數範本（只用免費排盤與 13 維詳批可不填 AI Key）
