@@ -1,8 +1,11 @@
 // /api/interpret — AI 解读后端，接 OpenAI 兼容上游（支援本地 DGX Spark 直连 + 首字逾时自动切换备援）。
 // 契约（components/ChatPanel.tsx / InsightPanel.tsx）：
-//   POST { chart, messages:[{role,content}] } → SSE `data: {"delta":{"text":…}}` … `data: [DONE]`
+//   POST { chart, messages:[{role,content}], profile? } → SSE `data: {"delta":{"text":…}}` … `data: [DONE]`
 import { NextRequest } from 'next/server';
 import { formatDatasetKey, getDatasetReading } from '@/lib/ziwei-dataset';
+import { sanitizeProfile } from '@/lib/ziwei/profile';
+import { buildSubjectContext, palaceSummary } from '@/lib/ziwei/subject-context';
+import type { ZiweiChart } from '@/lib/ziwei/types';
 
 export const runtime = 'nodejs';
 
@@ -22,6 +25,30 @@ const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）命盘
 - 命理名词保留中文（命宫、化禄、廉贞、陀罗等）。
 - 健康、财务等话题只给命理视角的提醒，不输出医疗诊断或投资指令。
 - 首次整体解读 500–900 字；针对单一问题的追问直答要点，不复述全盘。`;
+
+/** 回答結構：命盤推斷只看盤；有填現況才加「對照你的現況」段（沒填時規則裡完全不提，避免 AI 硬寫一段） */
+const CHART_ONLY_RULE = `1. 先寫命盤推斷：只根據命盤（星曜、四化、宮位、大限、流年）與斷語庫，並引用具體宮位、星曜、四化或大限流年作依據；宮位干支與星曜以【十二宮摘要】為準。使用者指定了段落結構就照該結構寫，否則以「**【命盤推斷】**」為標題。`;
+
+function answerRules(hasProfile: boolean): string {
+  if (!hasProfile) {
+    return `
+回答結構（務必遵守）：
+${CHART_ONLY_RULE}
+2. 命主沒有提供任何現況：只寫命盤推斷，不要另寫任何談命主現況的段落，也不要猜測命主的感情、職業或財務狀況。
+3. 年齡、今年、目前大限一律以【命主資訊】為準。`;
+  }
+  return `
+回答結構（務必遵守）：
+${CHART_ONLY_RULE}這部分完全不得提及、暗示或引用命主現況（感情、職業、子女、收入、存款、關心事項），也不得假裝從盤上「看出」現況。
+2. 最後一段固定為「**【對照你的現況】**」，每一點以下列三種之一開頭：
+   - ✅吻合：盤面與現況一致，說明怎麼順勢發揮。
+   - ⚠️落差：盤面與現況不同。不說盤錯、也不說人選錯，解讀為盤面潛力尚未發揮，給一個過渡做法；不得建議辭職、離婚、分手、借貸投資等激烈決定。
+   - 💡時機：結合年齡、目前大限（含今年還有幾年）與今年流年，說明哪段時間做什麼。
+   細則：只用與本題相關的現況欄位，不要逐項複述；金額只用所給區間談比例與習慣，不推薦投資商品、不編具體金額；離婚、喪偶、待業、健康等狀態語氣溫和、不說宿命、不做醫療診斷；盤面對此沒有依據就直說「盤面對此著墨不多」。本題與現況無關時（例如純命理名詞解釋）省略此段。
+3. 不得用現況推論或修正盤面（例如「你已婚所以夫妻宮……」）。
+4. 篇幅：命盤推斷約六到七成，對照段約三到四成；短的追問兩段各 2–4 點。
+5. 年齡、今年、目前大限一律以【命主資訊】為準。`;
+}
 
 type InMsg = { role: 'user' | 'assistant'; content: string };
 
@@ -212,12 +239,19 @@ export async function POST(req: NextRequest) {
   const key = process.env.INTERPRET_API_KEY;
   if (!key) return new Response('AI provider not configured', { status: 503 });
 
-  let chart: unknown; let messages: InMsg[] = [];
+  let chart: unknown; let messages: InMsg[] = []; let profileRaw: unknown;
   try {
     const body = await req.json();
     chart = body.chart;
+    profileRaw = body.profile;
     if (Array.isArray(body.messages)) messages = body.messages;
   } catch { /* fallthrough */ }
+
+  const profile = sanitizeProfile(profileRaw);
+  let subjectCtx = '';
+  try {
+    subjectCtx = `${buildSubjectContext(chart as ZiweiChart, profile)}\n\n${palaceSummary(chart as ZiweiChart)}`;
+  } catch { /* 命盤格式不完整時略過命主資訊與宮位摘要 */ }
 
   const chartCtx = clip(chart);
   const safeMsgs = messages
@@ -229,7 +263,12 @@ export async function POST(req: NextRequest) {
   const ragCtx = await buildDatasetRagSnippet(chart, lastUserContent);
 
   const messagesPayload = [
-    { role: 'system', content: SYSTEM_PROMPT + (chartCtx ? `\n\n当前命盘数据(JSON)：\n${chartCtx}` : '') + ragCtx },
+    {
+      role: 'system',
+      content: SYSTEM_PROMPT + answerRules(!!profile)
+        + (subjectCtx ? `\n\n${subjectCtx}` : '')
+        + (chartCtx ? `\n\n当前命盘数据(JSON)：\n${chartCtx}` : '') + ragCtx,
+    },
     ...safeMsgs,
   ];
 

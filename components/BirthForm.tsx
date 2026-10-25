@@ -5,6 +5,8 @@ import type { BirthInfo } from '@/lib/ziwei/types';
 import { SHICHEN } from '@/lib/ziwei/constants';
 import { useTheme } from '@/components/ThemeProvider';
 import { PROVINCES } from '@/lib/ziwei/cities';
+import { sanitizeProfile, profileSummary, type LifeProfile } from '@/lib/ziwei/profile';
+import ProfileFields from '@/components/ProfileFields';
 
 export interface BirthFormState {
   name: string;
@@ -18,6 +20,8 @@ export interface BirthFormState {
   city: string;
   longitude: number;
   gender: 'male' | 'female';
+  /** 命主現況（選填，給 AI 參考） */
+  profile?: LifeProfile;
 }
 
 interface BirthFormProps {
@@ -27,6 +31,8 @@ interface BirthFormProps {
   onFormSave?: (data: BirthFormState) => void;
   /** 隐藏内部「立即起盘」按钮（合盘等场景由父级统一触发） */
   hideSubmit?: boolean;
+  /** 顯示「現況（選填）」區塊（排盤頁用） */
+  showProfile?: boolean;
 }
 
 const SHICHEN_NAMES = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
@@ -47,7 +53,7 @@ function isValidDate(y: number, m: number, d: number): boolean {
   return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
 }
 
-export default function BirthForm({ onSubmit, loading, initialData, onFormSave, hideSubmit }: BirthFormProps) {
+export default function BirthForm({ onSubmit, loading, initialData, onFormSave, hideSubmit, showProfile }: BirthFormProps) {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
 
@@ -63,8 +69,10 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
     city: initialData?.city ?? '',
     longitude: initialData?.longitude ?? 120,
     gender: initialData?.gender ?? 'male',
+    profile: sanitizeProfile(initialData?.profile),
   });
 
+  const [profileOpen, setProfileOpen] = useState(() => !!sanitizeProfile(initialData?.profile));
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [submitAttempted, setSubmitAttempted] = useState(false);
 
@@ -426,6 +434,36 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
           })}
         </div>
       </div>
+
+      {/* ── 現況（選填，給 AI 參考）── */}
+      {showProfile && (
+        <div style={{ marginBottom: '20px', border: `1px solid ${panelBorder}`, background: panelBg, borderRadius: '14px', padding: '10px 14px' }}>
+          <button
+            type="button"
+            onClick={() => setProfileOpen(v => !v)}
+            aria-expanded={profileOpen}
+            style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '8px', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: labelClr, fontSize: '12px' }}
+          >
+            <span>👤 現況（選填，給 AI 參考）</span>
+            {!profileOpen && form.profile && (
+              <span style={{ fontSize: '11px', color: goldText, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {profileSummary(form.profile).join('・')}
+              </span>
+            )}
+            <span style={{ marginLeft: 'auto' }}>{profileOpen ? '▴' : '▾'}</span>
+          </button>
+          {profileOpen && (
+            <div style={{ marginTop: '12px' }}>
+              <ProfileFields
+                value={form.profile}
+                onChange={(profile) => setForm({ ...form, profile })}
+                selectStyle={{ ...inputStyle, padding: '8px 12px', borderRadius: '10px' }}
+                labelColor={labelClr}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── 确认信息 Summary Chip ── */}
       <AnimatePresence>

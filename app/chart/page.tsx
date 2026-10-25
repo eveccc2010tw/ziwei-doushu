@@ -4,6 +4,7 @@ import BirthForm, { type BirthFormState } from '@/components/BirthForm';
 import ChartBoard from '@/components/ChartBoard';
 import InsightPanel from '@/components/InsightPanel';
 import ShareCardCanvas, { captureShareCard, downloadDataURL } from '@/components/ShareCardCanvas';
+import ProfileFields from '@/components/ProfileFields';
 import { useHistory } from '@/lib/ziwei/history';
 import { useChartPrefs, FONT_STEPS } from '@/lib/ziwei/chart-prefs';
 import { generateChart } from '@/lib/ziwei/algorithm';
@@ -24,6 +25,7 @@ interface CaseRow {
  * 2. 案件（server 端 /api/cases，跨裝置）
  * 3. 分享卡 PNG 下載
  * 4. 字級 A−／A＋、命盤／解讀顯示切換（本機記憶）
+ * 5. 命主現況（選填）：表單或「👤 現況」填寫，送給 AI 調整建議與出題，隨案件／歷史保存
  * 介面文字以繁體撰寫；其餘簡體字串由 Traditionalizer 於顯示層轉換。
  */
 export default function ChartPage() {
@@ -43,6 +45,7 @@ export default function ChartPage() {
   const [caseNote, setCaseNote] = useState('');
   const [caseFormOpen, setCaseFormOpen] = useState(false);
   const [caseMsg, setCaseMsg] = useState('');
+  const [profileOpen, setProfileOpen] = useState(false);
 
   const reloadCases = useCallback(async () => {
     try {
@@ -112,6 +115,7 @@ export default function ChartPage() {
         </p>
         <BirthForm
           key={formKey}
+          showProfile
           initialData={prefill ?? undefined}
           onFormSave={(form) => { setLastForm(form); save(form); setPrefill(null); }}
           onSubmit={(info: BirthInfo) => { setChart(generateChart(info)); setSelectedPalace(null); }}
@@ -211,7 +215,7 @@ export default function ChartPage() {
       <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
         <button
           type="button"
-          onClick={() => { setChart(null); setSelectedPalace(null); setCaseMsg(''); }}
+          onClick={() => { setChart(null); setSelectedPalace(null); setCaseMsg(''); setProfileOpen(false); }}
           style={{
             padding: '6px 14px', cursor: 'pointer',
             border: '1px solid #ccc', borderRadius: 8, background: 'transparent',
@@ -243,6 +247,19 @@ export default function ChartPage() {
           }}
         >
           📁 {caseFormOpen ? '取消儲存' : '儲存為案件'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setProfileOpen((v) => !v)}
+          disabled={!lastForm}
+          aria-expanded={profileOpen}
+          style={{
+            padding: '6px 14px', cursor: 'pointer',
+            border: '1px solid var(--t-border)', borderRadius: 8,
+            background: profileOpen ? 'rgba(212,168,67,0.16)' : 'transparent', color: 'var(--t-gold)',
+          }}
+        >
+          👤 現況{lastForm?.profile ? ' ✓' : ''}
         </button>
         {caseMsg && <span style={{ fontSize: 13, color: '#7a9a54' }}>{caseMsg}</span>}
 
@@ -294,6 +311,27 @@ export default function ChartPage() {
         </div>
       )}
 
+      {profileOpen && lastForm && (
+        <div
+          style={{
+            marginBottom: 16, padding: '12px 16px', borderRadius: 10,
+            border: '1px solid var(--t-border)', background: 'var(--t-card)',
+          }}
+        >
+          <div style={{ fontSize: 13, marginBottom: 10, color: 'var(--t-text2)' }}>
+            👤 命主現況（選填）——改完下一次問 AI 就生效；「儲存為案件」會一起存
+          </div>
+          <ProfileFields
+            value={lastForm.profile}
+            onChange={(profile) => {
+              const next = { ...lastForm, profile };
+              setLastForm(next);
+              save(next);
+            }}
+          />
+        </div>
+      )}
+
       {/* 兩側都保持掛載（隱藏只是不顯示），對話紀錄與選宮狀態不會因切換而消失 */}
       <div
         className="ziwei-workspace"
@@ -305,7 +343,7 @@ export default function ChartPage() {
         </div>
         <div className="ziwei-insight" hidden={!showInsight}>
           {/* 解讀隱藏時點宮位只同步選取，不觸發 AI 分析 */}
-          <InsightPanel chart={chart} selectedPalace={selectedPalace} paused={!showInsight} />
+          <InsightPanel chart={chart} selectedPalace={selectedPalace} paused={!showInsight} profile={lastForm?.profile} />
         </div>
       </div>
 

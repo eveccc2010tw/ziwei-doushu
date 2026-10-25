@@ -1,11 +1,14 @@
 'use client';
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { ZiweiChart, Palace } from '@/lib/ziwei/types';
 import type { TopicKey } from '@/lib/ziwei/db-analysis';
 import type { TimeView } from './TimeNav';
 import { PRESET_QUESTIONS, pickQuestions } from '@/lib/ziwei/preset-questions';
 import { isSubmitShortcut, SUBMIT_HINT } from '@/lib/submit-shortcut';
+import { fitsProfile, profileSummary, type LifeProfile } from '@/lib/ziwei/profile';
+import { chartFacts } from '@/lib/ziwei/subject-context';
+import { createSuggestLoader, type SuggestState } from '@/lib/ziwei/suggest-loader';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -25,6 +28,8 @@ interface InsightPanelProps {
   selectedSiHua?: SelectedSiHua | null;
   /** 面板被隱藏時為 true：只記錄選宮，不觸發 AI 分析 */
   paused?: boolean;
+  /** 命主現況（選填），隨 AI 請求送出 */
+  profile?: LifeProfile;
 }
 
 interface DatasetApiRecord {
@@ -223,6 +228,15 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
     <div className="space-y-0.5">
       {lines.map((line, i) => {
         const sectionMatch = line.match(/^\*\*【(.+?)】\*\*$/);
+        if (sectionMatch && /^(對照你的現況|对照你的现况)$/.test(sectionMatch[1])) {
+          return (
+            <div key={i} className="mt-3 pt-3 pb-0.5" style={{ borderTop: '1px dashed var(--t-border)' }}>
+              <span className="text-fs-12 font-semibold tracking-wide" style={{ color: 'var(--t-lucky)' }}>
+                【{sectionMatch[1]}】
+              </span>
+            </div>
+          );
+        }
         if (sectionMatch) {
           return (
             <div key={i} className="pt-3 pb-0.5 first:pt-0">
@@ -254,7 +268,7 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
   );
 }
 
-export default function InsightPanel({ chart, selectedPalace, selectedSiHua, paused = false }: InsightPanelProps) {
+export default function InsightPanel({ chart, selectedPalace, selectedSiHua, paused = false, profile }: InsightPanelProps) {
   const canUseDataset = chart.birthInfo.year >= 1950 && chart.birthInfo.year <= 2026;
   const [panelTab, setPanelTab] = useState<'dataset' | 'ai'>(canUseDataset ? 'dataset' : 'ai');
   const [activeTopic, setActiveTopic] = useState<TopicKey>('overview');
@@ -276,6 +290,25 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const profileRef = useRef(profile);
+  useEffect(() => { profileRef.current = profile; }, [profile]);
+
+  // AI 依本盤出題（只在 AI 分頁、面板顯示時，切到某領域才出；同盤同領域同現況快取）
+  const [aiQs, setAiQs] = useState<SuggestState>({ key: '', questions: [], loading: false });
+  const suggestLoader = useRef(createSuggestLoader(async (req: { chart: ZiweiChart; topic: TopicKey; profile?: LifeProfile }) => {
+    const res = await fetch('/api/suggest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    const data = await res.json().catch(() => ({}));
+    return Array.isArray(data.questions) ? data.questions.filter((q: unknown): q is string => typeof q === 'string') : [];
+  }, setAiQs)).current;
+  const { year: by, month: bm, day: bd, hour: bh, gender: bg } = chart.birthInfo;
+  const suggestKey = `${by}-${bm}-${bd}-${bh}-${bg}|${activeTopic}|${JSON.stringify(profile ?? null)}`;
+  const realAge = useMemo(() => {
+    try { return chartFacts(chart).ages.real; } catch { return undefined; }
+  }, [chart]);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { loadingRef.current = loading; }, [loading]);
@@ -310,6 +343,7 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
 
   useEffect(() => {
     setMessages([]);
+    suggestLoader.reset();
     aiAutoLoaded.current = false;
     lastPalaceBranch.current = undefined;
     lastSiHuaKey.current = undefined;
@@ -323,10 +357,21 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
     }
   }, [canUseDataset, chart.birthInfo, loadDataset]);
 
-  // 換領域時重抽預設提問
+  // 通用預設題：剔除與現況／年齡矛盾的題目後隨機抽
+  const pickGeneric = useCallback(
+    () => pickQuestions(PRESET_QUESTIONS[activeTopic].filter(q => fitsProfile(q, { profile, age: realAge })), 3),
+    [activeTopic, profile, realAge],
+  );
+  useEffect(() => { setSuggestions(pickGeneric()); }, [pickGeneric]);
+
+  const loadAiQuestions = useCallback(
+    (force: boolean) => suggestLoader.load(suggestKey, { chart, topic: activeTopic, profile }, force),
+    [suggestLoader, suggestKey, chart, activeTopic, profile],
+  );
+
   useEffect(() => {
-    setSuggestions(pickQuestions(PRESET_QUESTIONS[activeTopic], 3));
-  }, [activeTopic]);
+    if (panelTab === 'ai' && !paused) loadAiQuestions(false);
+  }, [panelTab, paused, loadAiQuestions]);
 
   // 輸入框隨內容長高（上限由 CSS max-height 控制）；空白或面板隱藏時交回 rows 決定高度
   useEffect(() => {
@@ -356,7 +401,7 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
       const res = await fetch('/api/interpret', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chart, messages: apiMessages }),
+        body: JSON.stringify({ chart, messages: apiMessages, profile: profileRef.current }),
       });
       if (res.status === 404) throw new Error('api-missing');
       if (!res.ok) throw new Error('请求失败');
@@ -508,6 +553,8 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
 
   const handleSend = () => ask(input);
 
+  const aiShown = panelTab === 'ai' && aiQs.key === suggestKey ? aiQs.questions : [];
+
   const currentTopicText = datasetRecord?.c?.[activeTopic] || '';
 
   return (
@@ -528,6 +575,7 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
               }}
             >
               📚 典籍詳批
+              <span className="block text-fs-10 font-normal opacity-80">預先整理的斷語</span>
             </button>
           )}
           <button
@@ -541,6 +589,7 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
             }}
           >
             ✨ AI 互動解讀
+            <span className="block text-fs-10 font-normal opacity-80">即時推斷</span>
           </button>
         </div>
       </div>
@@ -569,6 +618,22 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
         </div>
       </div>
 
+      {/* ── AI 即時推斷說明＋已帶入現況 ── */}
+      {panelTab === 'ai' && (
+        <div className="flex-shrink-0 px-3 py-2 space-y-1 text-fs-11 leading-relaxed" style={{ borderBottom: '1px solid var(--t-border)', background: 'rgba(212,168,67,0.05)', color: 'var(--t-text2)' }}>
+          <div>
+            <span className="font-semibold" style={{ color: 'var(--t-gold)' }}>✨ AI 即時推斷：</span>
+            由大型語言模型讀取這張命盤的星曜、四化、大限流年，搭配典籍斷語即時推算，每次生成都不同，不是預先寫好的範本。
+          </div>
+          {profile && (
+            <div style={{ color: 'var(--t-lucky)' }}>
+              👤 已帶入現況：{profileSummary(profile).join('・')}（現況資料會送給 AI）
+            </div>
+          )}
+          <div className="text-fs-10" style={{ color: 'var(--t-faint)' }}>命理推斷僅供參考</div>
+        </div>
+      )}
+
       {/* ── Content Area ── */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0" style={{ maxHeight: '72vh' }}>
         {panelTab === 'dataset' ? (
@@ -582,14 +647,17 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
               {datasetError}
             </div>
           ) : (
-            <AiContent key={activeTopic} text={currentTopicText} />
+            <>
+              <div className="text-fs-10 mb-2" style={{ color: 'var(--t-faint)' }}>📚 以下為預先整理的典籍斷語（非即時生成）</div>
+              <AiContent key={activeTopic} text={currentTopicText} />
+            </>
           )
         ) : (
           <>
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="text-4xl mb-3" style={{ color: 'var(--t-gold)', opacity: 0.1 }}>✦</div>
-                <p className="text-fs-12 animate-pulse" style={{ color: 'var(--t-faint)' }}>命格解读生成中…</p>
+                <p className="text-fs-12 animate-pulse" style={{ color: 'var(--t-faint)' }}>AI 即時推斷生成中…</p>
               </div>
             )}
 
@@ -631,7 +699,7 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
                       style={{ color: 'var(--t-faint)' }}
                     >
                       <span style={{ color: 'var(--t-gold)', opacity: 0.4 }}>✦</span>
-                      AI 命理解讀
+                      ✨ AI 即時推斷
                     </div>
                     <AiContent text={msg.content} streaming={loading && isLastMsg} />
                   </motion.div>
@@ -658,7 +726,25 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
           >
             📜 完整分析【{activeLabel}】
           </button>
-          {suggestions.map(q => (
+          {panelTab === 'ai' && aiQs.key === suggestKey && aiQs.loading && (
+            <span className="px-2.5 py-1 rounded-full text-fs-11 animate-pulse" style={{ border: '1px dashed var(--t-border)', color: 'var(--t-faint)' }}>
+              ✨ AI 依本盤出題中…
+            </span>
+          )}
+          {aiShown.map(q => (
+            <button
+              key={`ai-${q}`}
+              type="button"
+              onClick={() => ask(q)}
+              disabled={loading}
+              title="AI 依本盤即時出題"
+              className="px-2.5 py-1 rounded-full text-fs-11 text-left transition-all disabled:opacity-40 hover:brightness-110"
+              style={{ border: '1px solid rgba(212,168,67,0.35)', background: 'rgba(212,168,67,0.06)', color: 'var(--t-text)' }}
+            >
+              ✨ {q}
+            </button>
+          ))}
+          {suggestions.slice(0, aiShown.length ? 2 : 3).map(q => (
             <button
               key={q}
               type="button"
@@ -672,7 +758,10 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
           ))}
           <button
             type="button"
-            onClick={() => setSuggestions(pickQuestions(PRESET_QUESTIONS[activeTopic], 3))}
+            onClick={() => {
+              setSuggestions(pickGeneric());
+              if (panelTab === 'ai' && !aiQs.loading) loadAiQuestions(true);
+            }}
             className="px-2 py-1 rounded-full text-fs-11 transition-all"
             style={{ border: '1px dashed var(--t-border)', color: 'var(--t-faint)' }}
             title="換一批題目"

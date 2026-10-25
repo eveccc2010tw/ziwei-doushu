@@ -2,6 +2,8 @@
 // 契约（app/heming/page.tsx）：
 //   POST { chartA, chartB, question? } → SSE `data: {"delta":{"text":…}}` … `data: [DONE]`
 import { NextRequest } from 'next/server';
+import { buildSubjectBasics } from '@/lib/ziwei/subject-context';
+import type { ZiweiChart } from '@/lib/ziwei/types';
 
 export const runtime = 'nodejs';
 
@@ -123,11 +125,18 @@ export async function POST(req: NextRequest) {
     if (typeof body.question === 'string') question = body.question.slice(0, 500);
   } catch { /* fallthrough */ }
 
+  // 兩人的性別、年齡、目前大限與今年流年明確寫出，避免 AI 自行推算出錯
+  let subjects = '';
+  try {
+    subjects = `${buildSubjectBasics(chartA as ZiweiChart, new Date(), '盘A 命主資訊')}\n\n${buildSubjectBasics(chartB as ZiweiChart, new Date(), '盘B 命主資訊')}\n\n`;
+  } catch { /* 命盤格式不完整時略過 */ }
+
   const messagesPayload = [
     { role: 'system', content: SYSTEM_PROMPT },
     {
       role: 'user',
       content:
+        subjects +
         `盘A(JSON)：\n${clip(chartA)}\n\n盘B(JSON)：\n${clip(chartB)}\n\n` +
         (question ? `重点关注问题：${question}` : '请给出两盘合盘分析。'),
     },
