@@ -1,7 +1,7 @@
 'use client';
 import type { CSSProperties } from 'react';
 import {
-  RELATIONSHIP_OPTIONS, OCCUPATION_OPTIONS, CHILDREN_OPTIONS, MONEY_RANGE_OPTIONS, CONCERN_OPTIONS,
+  RELATIONSHIP_OPTIONS, OCCUPATION_OPTIONS, CHILDREN_OPTIONS, INCOME_OPTIONS, INCOME_LEGACY_OPTIONS, ASSET_OPTIONS, CONCERN_OPTIONS,
   sanitizeProfile, type LifeProfile,
 } from '@/lib/ziwei/profile';
 
@@ -20,8 +20,9 @@ const SELECTS = [
   ['relationship', '感情狀態', RELATIONSHIP_OPTIONS],
   ['occupation', '職業', OCCUPATION_OPTIONS],
   ['children', '子女', CHILDREN_OPTIONS],
-  ['income', '年收入', MONEY_RANGE_OPTIONS],
-  ['savings', '總存款', MONEY_RANGE_OPTIONS],
+  ['income', '年收入', INCOME_OPTIONS],
+  ['realEstate', '房地產', ASSET_OPTIONS],
+  ['liquidAssets', '現金＋股票', ASSET_OPTIONS],
 ] as const;
 
 const defaultSelect: CSSProperties = {
@@ -29,7 +30,7 @@ const defaultSelect: CSSProperties = {
   background: 'var(--t-bg)', border: '1px solid var(--t-border)', color: 'var(--t-text)',
 };
 
-/** 命主現況（全部選填、全部用選的）：感情、職業、子女、年收入／存款區間、目前最關心 */
+/** 命主現況（全部選填、全部用選的）：感情、職業、子女、年收入、房地產與現金＋股票區間、目前最關心 */
 export default function ProfileFields({ value, onChange, selectStyle, labelColor }: ProfileFieldsProps) {
   const p = value ?? {};
   const set = (patch: Record<string, unknown>) => onChange(sanitizeProfile({ ...p, ...patch }));
@@ -47,6 +48,9 @@ export default function ProfileFields({ value, onChange, selectStyle, labelColor
               style={selectStyle ?? defaultSelect}
             >
               <option value="">不填</option>
+              {key === 'income' && INCOME_LEGACY_OPTIONS.filter(([code]) => code === p.income).map(([code, text]) => (
+                <option key={code} value={code}>{text}（舊級距，請重選）</option>
+              ))}
               {options.map(([code, text]) => <option key={code} value={code}>{text}</option>)}
             </select>
           </label>

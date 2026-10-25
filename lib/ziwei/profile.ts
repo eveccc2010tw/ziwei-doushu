@@ -1,7 +1,7 @@
 /**
  * 命主現況（選填）：排盤表單或命盤頁「👤 現況」填寫，送給 AI 用來調整建議與出題。
  * 全部欄位都是選項（enum）——server 端只認得下列代碼、自行換成文字，不把使用者輸入原樣塞進提示詞。
- * 金額只收區間，不收實際數字。
+ * 金額只收區間，不收實際數字；資產分房地產（對照田宅宮）與現金＋股票（對照財帛宮）。
  */
 
 export const RELATIONSHIP_OPTIONS = [
@@ -34,12 +34,30 @@ export const CHILDREN_OPTIONS = [
   ['has', '有'],
 ] as const;
 
-export const MONEY_RANGE_OPTIONS = [
+export const INCOME_OPTIONS = [
   ['lt50', '50 萬以下'],
   ['50to100', '50–100 萬'],
   ['100to200', '100–200 萬'],
   ['200to500', '200–500 萬'],
+  ['500to1000', '500–1000 萬'],
+  ['gt1000', '1000 萬以上'],
+] as const;
+
+/** 改版前的年收入級距：讀回舊資料時保留（不丟值），選單上提示重選 */
+export const INCOME_LEGACY_OPTIONS = [
   ['gt500', '500 萬以上'],
+] as const;
+
+/** 資產級距（單位：萬元），房地產與現金＋股票共用 */
+export const ASSET_OPTIONS = [
+  ['none', '無'],
+  ['lt100', '100 萬以內'],
+  ['100to500', '100–500 萬'],
+  ['500to1000', '500–1000 萬'],
+  ['1000to5000', '1000–5000 萬'],
+  ['5000to10000', '5000 萬–1 億'],
+  ['10000to30000', '1–3 億'],
+  ['gt30000', '3 億以上'],
 ] as const;
 
 export const CONCERN_OPTIONS = [
@@ -60,8 +78,9 @@ export interface LifeProfile {
   relationship?: Code<typeof RELATIONSHIP_OPTIONS>;
   occupation?: Code<typeof OCCUPATION_OPTIONS>;
   children?: Code<typeof CHILDREN_OPTIONS>;
-  income?: Code<typeof MONEY_RANGE_OPTIONS>;
-  savings?: Code<typeof MONEY_RANGE_OPTIONS>;
+  income?: Code<typeof INCOME_OPTIONS> | Code<typeof INCOME_LEGACY_OPTIONS>;
+  realEstate?: Code<typeof ASSET_OPTIONS>;
+  liquidAssets?: Code<typeof ASSET_OPTIONS>;
   concerns?: Code<typeof CONCERN_OPTIONS>[];
 }
 
@@ -84,8 +103,9 @@ export function sanitizeProfile(raw: unknown): LifeProfile | undefined {
     relationship: pick(RELATIONSHIP_OPTIONS, r.relationship),
     occupation: pick(OCCUPATION_OPTIONS, r.occupation),
     children: pick(CHILDREN_OPTIONS, r.children),
-    income: pick(MONEY_RANGE_OPTIONS, r.income),
-    savings: pick(MONEY_RANGE_OPTIONS, r.savings),
+    income: pick([...INCOME_OPTIONS, ...INCOME_LEGACY_OPTIONS], r.income),
+    realEstate: pick(ASSET_OPTIONS, r.realEstate),
+    liquidAssets: pick(ASSET_OPTIONS, r.liquidAssets),
     concerns: concerns.length ? (concerns as LifeProfile['concerns']) : undefined,
   };
   for (const k of Object.keys(p) as (keyof LifeProfile)[]) if (p[k] === undefined) delete p[k];
@@ -101,10 +121,12 @@ export function profileSummary(p: LifeProfile | undefined): string[] {
   const occ = labelOf(OCCUPATION_OPTIONS, p.occupation);
   if (occ) out.push(occ);
   if (p.children) out.push(p.children === 'has' ? '有子女' : '無子女');
-  const income = labelOf(MONEY_RANGE_OPTIONS, p.income);
+  const income = labelOf([...INCOME_OPTIONS, ...INCOME_LEGACY_OPTIONS], p.income);
   if (income) out.push(`年收入 ${income}`);
-  const savings = labelOf(MONEY_RANGE_OPTIONS, p.savings);
-  if (savings) out.push(`存款 ${savings}`);
+  const realEstate = labelOf(ASSET_OPTIONS, p.realEstate);
+  if (realEstate) out.push(`房地產 ${realEstate}`);
+  const liquid = labelOf(ASSET_OPTIONS, p.liquidAssets);
+  if (liquid) out.push(`現金＋股票 ${liquid}`);
   if (p.concerns?.length) out.push(`關心：${p.concerns.map((c) => labelOf(CONCERN_OPTIONS, c)).join('、')}`);
   return out;
 }
@@ -117,8 +139,9 @@ export function profilePromptLines(p: LifeProfile | undefined): string[] {
   add('感情狀態', labelOf(RELATIONSHIP_OPTIONS, p.relationship));
   add('職業', labelOf(OCCUPATION_OPTIONS, p.occupation));
   add('子女', labelOf(CHILDREN_OPTIONS, p.children));
-  add('年收入（新台幣，區間）', labelOf(MONEY_RANGE_OPTIONS, p.income));
-  add('總存款（新台幣，區間）', labelOf(MONEY_RANGE_OPTIONS, p.savings));
+  add('年收入（新台幣，區間）', labelOf([...INCOME_OPTIONS, ...INCOME_LEGACY_OPTIONS], p.income));
+  add('房地產（新台幣，區間；對照田宅宮）', labelOf(ASSET_OPTIONS, p.realEstate));
+  add('現金＋股票（新台幣，區間；對照財帛宮）', labelOf(ASSET_OPTIONS, p.liquidAssets));
   add('目前最關心', p.concerns?.map((c) => labelOf(CONCERN_OPTIONS, c)).join('、'));
   return lines;
 }
