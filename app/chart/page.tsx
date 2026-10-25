@@ -1,12 +1,13 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import BirthForm, { type BirthFormState } from '@/components/BirthForm';
 import ChartBoard from '@/components/ChartBoard';
-import InsightPanel from '@/components/InsightPanel';
+import InsightPanel, { type Message as ChatMessage } from '@/components/InsightPanel';
 import ShareCardCanvas, { captureShareCard, downloadDataURL } from '@/components/ShareCardCanvas';
 import ProfileFields from '@/components/ProfileFields';
 import { useHistory } from '@/lib/ziwei/history';
 import { useChartPrefs, FONT_STEPS } from '@/lib/ziwei/chart-prefs';
+import { createChatSaveQueue } from '@/lib/ziwei/chat-save-queue';
 import { generateChart } from '@/lib/ziwei/algorithm';
 import type { BirthInfo, ZiweiChart, Palace } from '@/lib/ziwei/types';
 
@@ -17,6 +18,28 @@ interface CaseRow {
   form: Partial<BirthFormState>;
   createdAt: number;
   updatedAt: number;
+  chatCount?: number;
+}
+
+/** 表單的出生資料是否與案件相同（改了生日／時間／性別／地點就不再算同一案件） */
+function sameBirth(a: Partial<BirthFormState>, b: Partial<BirthFormState>): boolean {
+  const keys = ['year', 'month', 'day', 'clockHour', 'clockMinute', 'gender'] as const;
+  return keys.every((k) => String(a[k] ?? '') === String(b[k] ?? ''))
+    && !!a.unknownTime === !!b.unknownTime
+    && Number(a.longitude ?? 120) === Number(b.longitude ?? 120);
+}
+
+async function saveCaseChat(id: string, messages: ChatMessage[]): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/cases/${id}/chat`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -26,6 +49,7 @@ interface CaseRow {
  * 3. 分享卡 PNG 下載
  * 4. 字級 A−／A＋、命盤／解讀顯示切換（本機記憶）
  * 5. 命主現況（選填）：表單或「👤 現況」填寫，送給 AI 調整建議與出題，隨案件／歷史保存
+ * 6. 從案件打開的盤：再存就覆蓋同一案件（可另存新案件）；AI 對話每答完一題自動存進案件、打開案件時帶回
  * 介面文字以繁體撰寫；其餘簡體字串由 Traditionalizer 於顯示層轉換。
  */
 export default function ChartPage() {
@@ -46,6 +70,23 @@ export default function ChartPage() {
   const [caseFormOpen, setCaseFormOpen] = useState(false);
   const [caseMsg, setCaseMsg] = useState('');
   const [profileOpen, setProfileOpen] = useState(false);
+  // 目前對應的案件（從案件打開，或本次已存成案件）；AI 對話會自動存進去
+  const [activeCase, setActiveCase] = useState<CaseRow | null>(null);
+  const activeCaseRef = useRef<CaseRow | null>(null);
+  useEffect(() => { activeCaseRef.current = activeCase; }, [activeCase]);
+  const [caseChat, setCaseChat] = useState<ChatMessage[] | undefined>(undefined);
+  // 每次起盤／重新起盤／點案件或歷史加一；非同步回應若已不屬於目前這次起盤就丟棄，避免把別張盤綁到舊案件
+  const sessionRef = useRef(0);
+  // 每次起盤各自最新的 AI 對話（存檔佇列送出時取用）。不主動清除：還有存檔在排隊的舊起盤不能被清掉，
+  // 分頁重新整理就歸零，一天開上百張盤也只佔幾 MB
+  const chatBySession = useRef(new Map<number, ChatMessage[]>());
+  const setSessionChat = (session: number, messages: ChatMessage[]) => {
+    chatBySession.current.set(session, messages);
+  };
+  const queueChatSave = useRef(createChatSaveQueue<ChatMessage>({
+    latestFor: (session) => chatBySession.current.get(session) ?? [],
+    save: saveCaseChat,
+  })).current;
 
   const reloadCases = useCallback(async () => {
     try {
@@ -58,32 +99,55 @@ export default function ChartPage() {
 
   useEffect(() => { reloadCases(); }, [reloadCases]);
 
-  const handleSaveCase = async () => {
+  /** 有對應案件就覆蓋更新，asNew 時另存一筆新案件；存完把目前的 AI 對話一起存進去 */
+  const handleSaveCase = async (asNew = false) => {
     if (!lastForm) return;
+    const session = sessionRef.current;
+    const target = asNew ? null : activeCase;
+    const name = lastForm.name?.trim() || '未命名';
     setCaseMsg('儲存中…');
     try {
       const r = await fetch('/api/cases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: lastForm.name?.trim() || '未命名',
-          note: caseNote.trim(),
-          form: lastForm,
-        }),
+        body: JSON.stringify({ id: target?.id, name, note: caseNote.trim(), form: lastForm }),
       });
       if (!r.ok) throw new Error(String(r.status));
+      const saved: CaseRow = (await r.json()).case;
+      const sameChart = sessionRef.current === session;
+      // 先綁定案件（不等對話存完），之後答完的題目才會自動存進來；已換盤則不綁到新盤
+      if (sameChart) {
+        activeCaseRef.current = saved;
+        setActiveCase(saved);
+      }
+      // 排進存檔佇列：送出時取「這次起盤」最新的對話，存檔期間答完的也會帶上
+      const chatOk = await queueChatSave(saved.id, session);
+      reloadCases();
+      if (!sameChart || sessionRef.current !== session) return;
       setCaseNote('');
       setCaseFormOpen(false);
-      setCaseMsg(`已儲存案件（${lastForm.name?.trim() || '未命名'}）`);
-      reloadCases();
+      const done = target ? `已更新案件（${name}）` : `已儲存案件（${name}）`;
+      setCaseMsg(chatOk ? done : `${done}，但 AI 對話存檔失敗，請再按一次`);
     } catch {
-      setCaseMsg('儲存失敗，請重試');
+      if (sessionRef.current === session) setCaseMsg('儲存失敗，請重試');
     }
   };
+
+  const handleConversationChange = useCallback((messages: ChatMessage[]) => {
+    const session = sessionRef.current;
+    setSessionChat(session, messages);
+    const c = activeCaseRef.current;
+    if (!c) return;
+    queueChatSave(c.id, session).then((ok) => {
+      if (ok) reloadCases();
+      else if (sessionRef.current === session) setCaseMsg('AI 對話自動存檔失敗，可按「更新案件」重存');
+    });
+  }, [reloadCases, queueChatSave]);
 
   const handleDeleteCase = async (id: string) => {
     try {
       await fetch(`/api/cases/${id}`, { method: 'DELETE' });
+      if (activeCaseRef.current?.id === id) setActiveCase(null);
       reloadCases();
     } catch { /* ignore */ }
   };
@@ -117,8 +181,27 @@ export default function ChartPage() {
           key={formKey}
           showProfile
           initialData={prefill ?? undefined}
-          onFormSave={(form) => { setLastForm(form); save(form); setPrefill(null); }}
-          onSubmit={(info: BirthInfo) => { setChart(generateChart(info)); setSelectedPalace(null); }}
+          onFormSave={(form) => {
+            setLastForm(form); save(form); setPrefill(null);
+            setActiveCase((cur) => (cur && sameBirth(cur.form, form) ? cur : null));
+          }}
+          onSubmit={async (info: BirthInfo) => {
+            // 從案件打開：先讀回該案件的 AI 對話，起盤後帶入
+            const session = ++sessionRef.current;
+            let chat: ChatMessage[] | undefined;
+            const c = activeCaseRef.current;
+            if (c) {
+              try {
+                const r = await fetch(`/api/cases/${c.id}/chat`, { cache: 'no-store' });
+                if (r.ok) chat = (await r.json()).messages;
+              } catch { /* 讀不到就從空白對話開始 */ }
+            }
+            if (sessionRef.current !== session) return; // 讀對話期間又換了盤
+            setCaseChat(chat);
+            setSessionChat(session, chat ?? []);
+            setChart(generateChart(info));
+            setSelectedPalace(null);
+          }}
         />
 
         {cases.length > 0 && (
@@ -138,10 +221,11 @@ export default function ChartPage() {
                 >
                   <button
                     type="button"
-                    onClick={() => applyPrefill(c.form)}
+                    onClick={() => { sessionRef.current++; applyPrefill(c.form); setActiveCase(c); }}
                     style={{ flex: 1, textAlign: 'left', cursor: 'pointer', background: 'transparent', border: 'none', padding: 0, fontSize: 14, color: '#333' }}
                   >
                     <strong>{c.name}</strong>
+                    {!!c.chatCount && <span style={{ color: '#8a6d1a', fontSize: 12, marginLeft: 8 }}>💬 {c.chatCount}</span>}
                     {c.note && <span style={{ color: '#666', fontSize: 12, marginLeft: 8 }}>{c.note.slice(0, 40)}</span>}
                     <span style={{ color: '#aaa', fontSize: 12, marginLeft: 8 }}>
                       {new Date(c.updatedAt).toLocaleString('zh-TW', { hour12: false })}
@@ -181,7 +265,7 @@ export default function ChartPage() {
                 >
                   <button
                     type="button"
-                    onClick={() => applyPrefill(e.form)}
+                    onClick={() => { sessionRef.current++; applyPrefill(e.form); setActiveCase(null); }}
                     style={{ flex: 1, textAlign: 'left', cursor: 'pointer', background: 'transparent', border: 'none', padding: 0, fontSize: 14, color: '#333' }}
                   >
                     {e.label}
@@ -215,7 +299,12 @@ export default function ChartPage() {
       <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
         <button
           type="button"
-          onClick={() => { setChart(null); setSelectedPalace(null); setCaseMsg(''); setProfileOpen(false); }}
+          onClick={() => {
+            setChart(null); setSelectedPalace(null); setCaseMsg(''); setProfileOpen(false);
+            sessionRef.current++;
+            setActiveCase(null); setCaseChat(undefined);
+            setCaseFormOpen(false); setCaseNote('');
+          }}
           style={{
             padding: '6px 14px', cursor: 'pointer',
             border: '1px solid #ccc', borderRadius: 8, background: 'transparent',
@@ -238,7 +327,7 @@ export default function ChartPage() {
         </button>
         <button
           type="button"
-          onClick={() => { setCaseFormOpen((v) => !v); setCaseMsg(''); }}
+          onClick={() => { setCaseFormOpen((v) => !v); setCaseMsg(''); setCaseNote(activeCase?.note ?? ''); }}
           disabled={!lastForm}
           style={{
             padding: '6px 14px', cursor: 'pointer',
@@ -246,7 +335,7 @@ export default function ChartPage() {
             background: 'rgba(122,154,84,0.12)', color: '#4c6b2d',
           }}
         >
-          📁 {caseFormOpen ? '取消儲存' : '儲存為案件'}
+          📁 {caseFormOpen ? '取消' : activeCase ? '更新案件' : '儲存為案件'}
         </button>
         <button
           type="button"
@@ -261,6 +350,9 @@ export default function ChartPage() {
         >
           👤 現況{lastForm?.profile ? ' ✓' : ''}
         </button>
+        {activeCase && !caseMsg && (
+          <span style={{ fontSize: 12, color: 'var(--t-faint)' }}>案件：{activeCase.name}（AI 對話自動存）</span>
+        )}
         {caseMsg && <span style={{ fontSize: 13, color: '#7a9a54' }}>{caseMsg}</span>}
 
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -286,7 +378,7 @@ export default function ChartPage() {
           }}
         >
           <span style={{ fontSize: 13, color: '#555' }}>
-            案件名稱：<strong>{lastForm.name?.trim() || '未命名'}</strong>
+            {activeCase ? '更新案件' : '案件名稱'}：<strong>{lastForm.name?.trim() || '未命名'}</strong>
           </span>
           <input
             type="text"
@@ -300,14 +392,26 @@ export default function ChartPage() {
           />
           <button
             type="button"
-            onClick={handleSaveCase}
+            onClick={() => handleSaveCase()}
             style={{
               padding: '6px 16px', cursor: 'pointer', borderRadius: 8,
               border: '1px solid #7a9a54', background: '#7a9a54', color: '#fff', fontSize: 13,
             }}
           >
-            確認儲存
+            {activeCase ? '確認更新' : '確認儲存'}
           </button>
+          {activeCase && (
+            <button
+              type="button"
+              onClick={() => handleSaveCase(true)}
+              style={{
+                padding: '6px 12px', cursor: 'pointer', borderRadius: 8,
+                border: '1px solid #7a9a54', background: 'transparent', color: '#4c6b2d', fontSize: 13,
+              }}
+            >
+              另存新案件
+            </button>
+          )}
         </div>
       )}
 
@@ -343,7 +447,14 @@ export default function ChartPage() {
         </div>
         <div className="ziwei-insight" hidden={!showInsight}>
           {/* 解讀隱藏時點宮位只同步選取，不觸發 AI 分析 */}
-          <InsightPanel chart={chart} selectedPalace={selectedPalace} paused={!showInsight} profile={lastForm?.profile} />
+          <InsightPanel
+            chart={chart}
+            selectedPalace={selectedPalace}
+            paused={!showInsight}
+            profile={lastForm?.profile}
+            initialMessages={caseChat}
+            onConversationChange={handleConversationChange}
+          />
         </div>
       </div>
 

@@ -11,7 +11,7 @@ import { fitsProfile, profileSummary, type LifeProfile } from '@/lib/ziwei/profi
 import { chartFacts } from '@/lib/ziwei/subject-context';
 import { createSuggestLoader, type SuggestState } from '@/lib/ziwei/suggest-loader';
 
-interface Message {
+export interface Message {
   role: 'user' | 'assistant';
   content: string;
   hidden?: boolean;
@@ -33,6 +33,10 @@ interface InsightPanelProps {
   paused?: boolean;
   /** 命主現況（選填），隨 AI 請求送出 */
   profile?: LifeProfile;
+  /** 換盤時帶入的既有對話（從案件打開時） */
+  initialMessages?: Message[];
+  /** 每答完一題回報目前對話（不含系統提示），外層用來存進案件 */
+  onConversationChange?: (messages: Message[]) => void;
 }
 
 interface DatasetApiRecord {
@@ -271,7 +275,9 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
   );
 }
 
-export default function InsightPanel({ chart, selectedPalace, selectedSiHua, paused = false, profile }: InsightPanelProps) {
+export default function InsightPanel({
+  chart, selectedPalace, selectedSiHua, paused = false, profile, initialMessages, onConversationChange,
+}: InsightPanelProps) {
   const canUseDataset = chart.birthInfo.year >= 1950 && chart.birthInfo.year <= 2026;
   const [panelTab, setPanelTab] = useState<'dataset' | 'ai'>(canUseDataset ? 'dataset' : 'ai');
   const [activeTopic, setActiveTopic] = useState<TopicKey>('overview');
@@ -295,6 +301,10 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const profileRef = useRef(profile);
   useEffect(() => { profileRef.current = profile; }, [profile]);
+  const initialMessagesRef = useRef(initialMessages);
+  useEffect(() => { initialMessagesRef.current = initialMessages; }, [initialMessages]);
+  // 有新答完的回覆時設 true，對話穩定後回報給外層存檔
+  const answeredRef = useRef(false);
 
   // AI 依本盤出題（只在 AI 分頁、面板顯示時，切到某領域才出；同盤同領域同現況快取）
   const [aiQs, setAiQs] = useState<SuggestState>({ key: '', questions: [], loading: false });
@@ -345,9 +355,10 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
   }, [canUseDataset, chart.birthInfo]);
 
   useEffect(() => {
-    setMessages([]);
+    const restored = initialMessagesRef.current ?? [];
+    setMessages(restored);
     suggestLoader.reset();
-    aiAutoLoaded.current = false;
+    aiAutoLoaded.current = restored.length > 0;
     lastPalaceBranch.current = undefined;
     lastSiHuaKey.current = undefined;
   }, [chart.birthInfo]);
@@ -441,6 +452,7 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
           } catch { /* skip */ }
         }
       }
+      if (assistantText) answeredRef.current = true;
     } catch (e) {
       const missing = e instanceof Error && e.message === 'api-missing';
       setMessages(prev => [...prev, { role: 'assistant', notice: true, content: missing ? '开源版不含 AI 解读接口（/api/interpret），需要你自己实现后才能用，详见 README「快速开始」。排盘本身不需要任何 API Key。' : '解读失败，请稍后重试。' }]);
@@ -449,6 +461,12 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
       loadingRef.current = false;
     }
   };
+
+  useEffect(() => {
+    if (loading || !answeredRef.current) return;
+    answeredRef.current = false;
+    onConversationChange?.(messages.filter(m => !m.notice));
+  }, [loading, messages, onConversationChange]);
 
   const sendMessage = useCallback((text: string, hidden = false) => {
     if (!text.trim() || loadingRef.current) return;
