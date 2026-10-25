@@ -7,6 +7,8 @@ import { sanitizeProfile } from '@/lib/ziwei/profile';
 import { chartFacts } from '@/lib/ziwei/subject-context';
 import { buildSuggestMessages, parseSuggestions, validateSuggestions } from '@/lib/ziwei/suggest';
 import { chatOnce } from '@/lib/llm-once';
+import { SUGGEST_LIMIT } from '@/lib/ask-limits';
+import { identifyCaller, checkRate, tooMany, withCaller } from '@/lib/rate-limit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,17 +28,21 @@ function looksLikeChart(c: unknown): c is ZiweiChart {
 }
 
 export async function POST(req: NextRequest) {
+  const caller = identifyCaller(req);
+  const json = (data: unknown, status = 200) => withCaller(Response.json(data, { status }), caller);
   let body: { chart?: unknown; topic?: unknown; profile?: unknown } | null;
   try {
     body = await req.json();
   } catch {
-    return Response.json({ error: 'invalid json' }, { status: 400 });
+    return json({ error: 'invalid json' }, 400);
   }
-  if (!body || typeof body !== 'object') return Response.json({ error: 'chart and topic required' }, { status: 400 });
+  if (!body || typeof body !== 'object') return json({ error: 'chart and topic required' }, 400);
   const { chart, topic } = body;
   if (!looksLikeChart(chart) || typeof topic !== 'string' || !Object.hasOwn(TOPIC_PALACE_NAME, topic)) {
-    return Response.json({ error: 'chart and topic required' }, { status: 400 });
+    return json({ error: 'chart and topic required' }, 400);
   }
+  const retryAfter = checkRate('suggest', caller, SUGGEST_LIMIT);
+  if (retryAfter) return tooMany(caller, retryAfter, { questions: [] });
   const profile = sanitizeProfile(body.profile);
   const now = new Date();
   let facts;
@@ -45,14 +51,14 @@ export async function POST(req: NextRequest) {
     facts = chartFacts(chart, now);
     messages = buildSuggestMessages(chart, topic as TopicKey, profile, now);
   } catch {
-    return Response.json({ error: 'invalid chart' }, { status: 400 });
+    return json({ error: 'invalid chart' }, 400);
   }
 
   const text = await chatOnce(messages);
-  if (!text) return Response.json({ questions: [], error: 'upstream unavailable' }, { status: 502 });
+  if (!text) return json({ questions: [], error: 'upstream unavailable' }, 502);
   try {
-    return Response.json({ questions: validateSuggestions(parseSuggestions(text), chart, facts, { profile }) });
+    return json({ questions: validateSuggestions(parseSuggestions(text), chart, facts, { profile }) });
   } catch {
-    return Response.json({ questions: [] });
+    return json({ questions: [] });
   }
 }

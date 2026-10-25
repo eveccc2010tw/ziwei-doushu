@@ -6,6 +6,7 @@ import type { TopicKey } from '@/lib/ziwei/db-analysis';
 import type { TimeView } from './TimeNav';
 import { PRESET_QUESTIONS, pickQuestions } from '@/lib/ziwei/preset-questions';
 import { isSubmitShortcut, SUBMIT_HINT } from '@/lib/submit-shortcut';
+import { MAX_QUESTION_CHARS, QUESTION_TOO_LONG_TEXT, rateLimitText } from '@/lib/ask-limits';
 import { fitsProfile, profileSummary, type LifeProfile } from '@/lib/ziwei/profile';
 import { chartFacts } from '@/lib/ziwei/subject-context';
 import { createSuggestLoader, type SuggestState } from '@/lib/ziwei/suggest-loader';
@@ -14,6 +15,8 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   hidden?: boolean;
+  /** 系統提示（頻率限制、失敗訊息）：不標 AI、不送回 AI */
+  notice?: boolean;
 }
 
 interface SelectedSiHua {
@@ -404,6 +407,12 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
         body: JSON.stringify({ chart, messages: apiMessages, profile: profileRef.current }),
       });
       if (res.status === 404) throw new Error('api-missing');
+      if (res.status === 429 || res.status === 413) {
+        const data = await res.json().catch(() => ({}));
+        const text = res.status === 429 ? rateLimitText(Number(data.retryAfterSec) || 600) : QUESTION_TOO_LONG_TEXT;
+        setMessages(prev => [...prev, { role: 'assistant', content: text, notice: true }]);
+        return;
+      }
       if (!res.ok) throw new Error('请求失败');
       if (!res.body) throw new Error('无响应流');
 
@@ -434,7 +443,7 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
       }
     } catch (e) {
       const missing = e instanceof Error && e.message === 'api-missing';
-      setMessages(prev => [...prev, { role: 'assistant', content: missing ? '开源版不含 AI 解读接口（/api/interpret），需要你自己实现后才能用，详见 README「快速开始」。排盘本身不需要任何 API Key。' : '解读失败，请稍后重试。' }]);
+      setMessages(prev => [...prev, { role: 'assistant', notice: true, content: missing ? '开源版不含 AI 解读接口（/api/interpret），需要你自己实现后才能用，详见 README「快速开始」。排盘本身不需要任何 API Key。' : '解读失败，请稍后重试。' }]);
     } finally {
       setLoading(false);
       loadingRef.current = false;
@@ -447,7 +456,7 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua, pau
     setLoading(true);
 
     const userMsg: Message = { role: 'user', content: text, hidden };
-    const apiMessages = [...messagesRef.current, userMsg].map(m => ({
+    const apiMessages = [...messagesRef.current, userMsg].filter(m => !m.notice).map(m => ({
       role: m.role,
       content: m.content,
     }));
@@ -665,6 +674,20 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
               {messages.map((msg, i) => {
                 if (msg.role === 'user' && msg.hidden) return null;
 
+                if (msg.notice) {
+                  return (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="rounded-lg px-3 py-2 text-fs-12"
+                      style={{ border: '1px dashed var(--t-border)', color: 'var(--t-text2)' }}
+                    >
+                      {msg.content}
+                    </motion.div>
+                  );
+                }
+
                 if (msg.role === 'user') {
                   return (
                     <motion.div
@@ -698,7 +721,6 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
                       className="text-fs-10 tracking-widest mb-2 flex items-center gap-1.5"
                       style={{ color: 'var(--t-faint)' }}
                     >
-                      <span style={{ color: 'var(--t-gold)', opacity: 0.4 }}>✦</span>
                       ✨ AI 即時推斷
                     </div>
                     <AiContent text={msg.content} streaming={loading && isLastMsg} />
@@ -781,6 +803,7 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
                 handleSend();
               }
             }}
+            maxLength={MAX_QUESTION_CHARS}
             placeholder="直接問 AI，如：今年適合換工作嗎？"
             disabled={loading}
             className="flex-1 rounded-lg px-3 py-2 text-fs-12 leading-relaxed resize-none focus:outline-none transition-colors"
@@ -806,7 +829,12 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
             {loading ? '…' : '送出'}
           </button>
         </div>
-        <div className="text-fs-10 text-right" style={{ color: 'var(--t-faint)' }}>{SUBMIT_HINT}</div>
+        <div className="flex justify-between gap-2 text-fs-10" style={{ color: 'var(--t-faint)' }}>
+          <span style={input.length >= MAX_QUESTION_CHARS ? { color: 'var(--t-sha)' } : undefined}>
+            {input.length}/{MAX_QUESTION_CHARS} 字
+          </span>
+          <span className="hidden sm:inline">{SUBMIT_HINT}</span>
+        </div>
       </div>
 
     </div>

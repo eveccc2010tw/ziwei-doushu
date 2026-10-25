@@ -4,6 +4,8 @@
 import { NextRequest } from 'next/server';
 import { buildSubjectBasics } from '@/lib/ziwei/subject-context';
 import type { ZiweiChart } from '@/lib/ziwei/types';
+import { ASK_LIMIT, MAX_QUESTION_CHARS } from '@/lib/ask-limits';
+import { identifyCaller, checkRate, tooMany, withCaller } from '@/lib/rate-limit';
 
 export const runtime = 'nodejs';
 
@@ -21,7 +23,8 @@ const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）合盘
 - 用户会附上两张命盘 JSON（盘A、盘B）；分析必须严格依据两盘实际星曜、四化、宫位，不编造盘面没有的内容。
 - 繁體中文（台灣用語）輸出，用小標題與要點組織（如：性格互动、沟通模式、感情节奏、金钱观、相处建议）。
 - 命理名词保留中文。不做医疗诊断或投资指令；结论给「命理视角」，语气专业不玄虚。
-- 全文 600–1000 字。`;
+- 全文 600–1000 字。
+- 只回答與命理、這兩張命盤、運勢與人生方向（從命盤角度）有關的問題。若問題與命理無關（例如寫程式、翻譯、寫文章或信件、一般知識、時事、作業），只用一句話婉拒，並建議一個可以從這兩張命盤問的方向，不要回答原題。`;
 
 function clip(obj: unknown, max = 12000): string {
   const s = obj ? JSON.stringify(obj) : '';
@@ -114,16 +117,22 @@ async function startUpstreamStream(
 }
 
 export async function POST(req: NextRequest) {
+  const caller = identifyCaller(req);
   const key = process.env.INTERPRET_API_KEY;
-  if (!key) return new Response('AI provider not configured', { status: 503 });
+  if (!key) return withCaller(new Response('AI provider not configured', { status: 503 }), caller);
 
   let chartA: unknown; let chartB: unknown; let question = '';
   try {
     const body = await req.json();
     chartA = body.chartA;
     chartB = body.chartB;
-    if (typeof body.question === 'string') question = body.question.slice(0, 500);
+    if (typeof body.question === 'string') question = body.question.trim();
   } catch { /* fallthrough */ }
+  if (question.length > MAX_QUESTION_CHARS) {
+    return withCaller(Response.json({ error: 'question_too_long' }, { status: 413 }), caller);
+  }
+  const retryAfter = checkRate('ask', caller, ASK_LIMIT);
+  if (retryAfter) return tooMany(caller, retryAfter);
 
   // 兩人的性別、年齡、目前大限與今年流年明確寫出，避免 AI 自行推算出錯
   let subjects = '';
@@ -150,7 +159,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (!active) {
-    return new Response('upstream unavailable', { status: 502 });
+    return withCaller(new Response('upstream unavailable', { status: 502 }), caller);
   }
 
   const { firstText, reader, initialBuf } = active;
@@ -209,7 +218,7 @@ export async function POST(req: NextRequest) {
     },
     cancel() { closed = true; reader.cancel().catch(() => {}); },
   });
-  return new Response(stream, {
+  return withCaller(new Response(stream, {
     headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache' },
-  });
+  }), caller);
 }

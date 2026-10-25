@@ -7,6 +7,7 @@
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { NextRequest } from 'next/server';
 import { generateChart } from '../../lib/ziwei/algorithm';
 
 type Mode = 'hang' | 'error500' | 'ok' | 'ok-keepalive';
@@ -67,7 +68,7 @@ async function main() {
   check(primary.state.closedAfterDone, '[DONE] 後主動中止連線');
 
   // 3. /api/suggest
-  const call = (body: string) => POST(new Request('http://local/api/suggest', { method: 'POST', body, headers: { 'Content-Type': 'application/json' } }) as never);
+  const call = (body: string) => POST(new NextRequest('http://local/api/suggest', { method: 'POST', body, headers: { 'Content-Type': 'application/json' } }));
   const chart = generateChart({ year: 1985, month: 6, day: 15, hour: 4, gender: 'male' });
   check((await call('{bad')).status === 400, '壞 JSON → 400');
   check((await call('null')).status === 400, 'null → 400');

@@ -6,6 +6,8 @@ import { formatDatasetKey, getDatasetReading } from '@/lib/ziwei-dataset';
 import { sanitizeProfile } from '@/lib/ziwei/profile';
 import { buildSubjectContext, palaceSummary } from '@/lib/ziwei/subject-context';
 import type { ZiweiChart } from '@/lib/ziwei/types';
+import { ASK_LIMIT } from '@/lib/ask-limits';
+import { identifyCaller, checkRate, tooMany, withCaller } from '@/lib/rate-limit';
 
 export const runtime = 'nodejs';
 
@@ -24,7 +26,16 @@ const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）命盘
 - 繁體中文（台灣用語）輸出，用小標題與要點組織，专业但不说玄虚空话。
 - 命理名词保留中文（命宫、化禄、廉贞、陀罗等）。
 - 健康、财务等话题只给命理视角的提醒，不输出医疗诊断或投资指令。
-- 首次整体解读 500–900 字；针对单一问题的追问直答要点，不复述全盘。`;
+- 首次整体解读 500–900 字；针对单一问题的追问直答要点，不复述全盘。
+- 只回答與命理、這張命盤、運勢與人生方向（從命盤角度）有關的問題。若問題與命理無關（例如寫程式、翻譯、寫文章或信件、一般知識、時事、作業），只用一句話婉拒，並建議一個可以從這張命盤問的方向，不要回答原題。`;
+
+/**
+ * 長度上限（防濫用）：對話框打字另由前端限 250 字；使用者訊息硬上限放寬到 1200，
+ * 因為點領域／宮位／四化會送出內建的長提示詞。AI 舊回覆隨對話紀錄送回時只截短、不拒絕，
+ * 免得某次回覆特別長就讓之後每一題都被擋。
+ */
+const MAX_USER_MSG_CHARS = 1200;
+const MAX_ASSISTANT_MSG_CHARS = 6000;
 
 /** 回答結構：命盤推斷只看盤；有填現況才加「對照你的現況」段（沒填時規則裡完全不提，避免 AI 硬寫一段） */
 const CHART_ONLY_RULE = `1. 先寫命盤推斷：只根據命盤（星曜、四化、宮位、大限、流年）與斷語庫，並引用具體宮位、星曜、四化或大限流年作依據；宮位干支與星曜以【十二宮摘要】為準。使用者指定了段落結構就照該結構寫，否則以「**【命盤推斷】**」為標題。`;
@@ -236,8 +247,9 @@ function proxyActiveStream(active: ActiveUpstream): Response {
 }
 
 export async function POST(req: NextRequest) {
+  const caller = identifyCaller(req);
   const key = process.env.INTERPRET_API_KEY;
-  if (!key) return new Response('AI provider not configured', { status: 503 });
+  if (!key) return withCaller(new Response('AI provider not configured', { status: 503 }), caller);
 
   let chart: unknown; let messages: InMsg[] = []; let profileRaw: unknown;
   try {
@@ -246,6 +258,11 @@ export async function POST(req: NextRequest) {
     profileRaw = body.profile;
     if (Array.isArray(body.messages)) messages = body.messages;
   } catch { /* fallthrough */ }
+
+  const tooLong = messages.some((m) => m && m.role === 'user' && typeof m.content === 'string' && m.content.length > MAX_USER_MSG_CHARS);
+  if (tooLong) return withCaller(Response.json({ error: 'message_too_long' }, { status: 413 }), caller);
+  const retryAfter = checkRate('ask', caller, ASK_LIMIT);
+  if (retryAfter) return tooMany(caller, retryAfter);
 
   const profile = sanitizeProfile(profileRaw);
   let subjectCtx = '';
@@ -257,7 +274,7 @@ export async function POST(req: NextRequest) {
   const safeMsgs = messages
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
     .slice(-12)
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({ role: m.role, content: m.role === 'assistant' ? m.content.slice(0, MAX_ASSISTANT_MSG_CHARS) : m.content }));
 
   const lastUserContent = [...safeMsgs].reverse().find(m => m.role === 'user')?.content || '';
   const ragCtx = await buildDatasetRagSnippet(chart, lastUserContent);
@@ -280,7 +297,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (!active) {
-    return new Response('upstream unavailable', { status: 502 });
+    return withCaller(new Response('upstream unavailable', { status: 502 }), caller);
   }
-  return proxyActiveStream(active);
+  return withCaller(proxyActiveStream(active), caller);
 }

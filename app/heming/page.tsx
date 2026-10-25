@@ -7,6 +7,7 @@ import { generateChart as buildChart } from '@/lib/ziwei/algorithm';
 import type { BirthInfo, ZiweiChart } from '@/lib/ziwei/types';
 import { useTheme } from '@/components/ThemeProvider';
 import { isSubmitShortcut, SUBMIT_HINT } from '@/lib/submit-shortcut';
+import { MAX_QUESTION_CHARS, QUESTION_TOO_LONG_TEXT, rateLimitText } from '@/lib/ask-limits';
 
 // ─── AiContent 渲染器（与 InsightPanel 一致）────────────────
 function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
@@ -68,6 +69,8 @@ export default function HemingPage() {
   // 开源版不含 /api/heming：接口 404 时单独说明，而不是让用户反复重试
   const [apiMissing, setApiMissing] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // 頻率限制／問題太長的提示（保留上一次的分析結果）
+  const [notice, setNotice] = useState<string | null>(null);
   const analysisRef = useRef<HTMLDivElement>(null);
 
   // ─── 起盘（单次调用，返回 chart 给统一流程使用）──────────
@@ -92,8 +95,8 @@ export default function HemingPage() {
       return;
     }
     setAnalyzing(true);
-    setAnalysis('');
     setAnalysisError(false);
+    setNotice(null);
 
     try {
       // 并行起两张盘（如果还没起）
@@ -119,7 +122,13 @@ export default function HemingPage() {
         body: JSON.stringify({ chartA: cA, chartB: cB, question: q ?? undefined }),
       });
       if (res.status === 404) { setApiMissing(true); throw new Error('api-missing'); }
+      if (res.status === 429 || res.status === 413) {
+        const data = await res.json().catch(() => ({}));
+        setNotice(res.status === 429 ? rateLimitText(Number(data.retryAfterSec) || 600) : QUESTION_TOO_LONG_TEXT);
+        return;
+      }
       if (!res.ok || !res.body) throw new Error();
+      setAnalysis('');
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -290,6 +299,12 @@ export default function HemingPage() {
                 : '分析暂时不可用，请重试。'}
             </div>
           )}
+
+          {notice && (
+            <div style={{ padding: '10px 14px', borderRadius: '10px', border: '1px dashed var(--bdr-med)', fontSize: '13px', color: 'var(--tx-2)', marginTop: '12px' }}>
+              {notice}
+            </div>
+          )}
         </div>
 
         {/* ═══ 针对合盘的追问聊天框（仅分析完成后显示）═══════════ */}
@@ -341,6 +356,7 @@ export default function HemingPage() {
                     runAnalysis(question || undefined);
                   }
                 }}
+                maxLength={MAX_QUESTION_CHARS}
                 placeholder="继续追问，如：哪几年是两人感情关键期？"
                 disabled={analyzing}
                 className="input-base"
@@ -361,7 +377,10 @@ export default function HemingPage() {
                 {analyzing ? '分析中…' : '继续追问'}
               </button>
             </div>
-            <div style={{ fontSize: '11px', color: 'var(--tx-3)', textAlign: 'right' }}>{SUBMIT_HINT}</div>
+            <div style={{ fontSize: '11px', color: 'var(--tx-3)', display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+              <span style={question.length >= MAX_QUESTION_CHARS ? { color: '#dc2626' } : undefined}>{question.length}/{MAX_QUESTION_CHARS} 字</span>
+              <span className="hidden sm:inline">{SUBMIT_HINT}</span>
+            </div>
           </div>
         )}
       </div>
