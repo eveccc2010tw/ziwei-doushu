@@ -1,4 +1,4 @@
-// /api/interpret — AI 解读后端，接 OpenAI 兼容上游（env 可换供应商）。
+// /api/interpret — AI 解读后端，接 OpenAI 兼容上游（支援本地 DGX Spark 直连 + 首字逾时自动切换备援）。
 // 契约（components/ChatPanel.tsx / InsightPanel.tsx）：
 //   POST { chart, messages:[{role,content}] } → SSE `data: {"delta":{"text":…}}` … `data: [DONE]`
 import { NextRequest } from 'next/server';
@@ -10,6 +10,7 @@ const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.openai.com/v1';
 const MODEL = process.env.INTERPRET_MODEL || 'gpt-4o-mini';
 const EFFORT = process.env.INTERPRET_EFFORT || 'none';
 const ENABLE_THINKING = process.env.INTERPRET_THINKING === 'true';
+const FIRST_TOKEN_TIMEOUT_MS = Number(process.env.INTERPRET_FIRST_TOKEN_TIMEOUT_MS || 4500);
 
 const FALLBACK_BASE_URL = process.env.INTERPRET_FALLBACK_BASE_URL || '';
 const FALLBACK_MODEL = process.env.INTERPRET_FALLBACK_MODEL || '';
@@ -48,33 +49,112 @@ async function buildDatasetRagSnippet(chart: unknown, lastUserMsg: string): Prom
     if (/感情|婚姻|夫妻|桃花|另一半|戀愛|恋爱/.test(q)) extraTopics.push('love');
     if (/事業|事业|工作|官祿|官禄|創業|创业|跳槽|職/.test(q)) extraTopics.push('career');
     if (/財|财|錢|钱|投資|投资|賺|赚/.test(q)) extraTopics.push('wealth');
-    if (/健康|疾厄|病|身體|身体/.test(q)) extraTopics.push('health');
-    if (/性格|個性|个性/.test(q)) extraTopics.push('personality');
-    if (/田宅|房|買房|买房|不動產/.test(q)) extraTopics.push('home');
-    if (/福德|精神|心態/.test(q)) extraTopics.push('spirit');
-    if (/遷移|迁移|出國|出国|外地/.test(q)) extraTopics.push('move');
-    if (/父母|長輩/.test(q)) extraTopics.push('parents');
-    if (/子女|小孩|孩子/.test(q)) extraTopics.push('children');
-    if (/兄弟|合夥|合伙/.test(q)) extraTopics.push('family');
-    if (/人際|朋友|僕役|交友|貴人/.test(q)) extraTopics.push('friends');
+    if (/健康|病|身體|身体|疾厄/.test(q)) extraTopics.push('health');
+    if (/家庭|兄弟|朋友|人際|人际/.test(q)) extraTopics.push('family', 'friends');
+    if (/買房|买房|田宅|搬家|出國|出国|遷移|迁移/.test(q)) extraTopics.push('home', 'move');
+    if (/子女|小孩|懷孕|怀孕/.test(q)) extraTopics.push('children');
+    if (/父母|長輩|长辈/.test(q)) extraTopics.push('parents');
 
-    const picked = ['overview' as const, ...extraTopics.filter(t => t !== 'overview')].slice(0, 2);
-    const chunks = picked.map(t => (rec.c[t] || '').slice(0, 1800));
-    return `\n\n当前命盘 v4.0 权威断语库参考（key=${rec.k}, engine=${rec._engine.source}）：\n${chunks.join('\n\n---\n\n')}`;
+    const picked = Array.from(new Set(['overview', 'personality', ...extraTopics])).slice(0, 4) as Array<keyof typeof rec.c>;
+    const chunks = picked.map((t) => `### [${t}]\n${(rec.c[t] || '').slice(0, 1200)}`);
+    return `\n\n【v4.0 权威断语库摘要 (${rec.k} · 命宫主星:${rec.ms || '无主星'})】：\n` + chunks.join('\n\n');
   } catch {
     return '';
   }
 }
 
-/** OpenAI 兼容 SSE → 本站 SSE。push-based（start 内循环）：reasoning 阶段无 content delta，
- *  pull-based 串流在 Node 实测不会再次触发 pull，会卡死 —— 勿改回 pull 模式。 */
-function proxyStream(upstream: Response): Response {
-  const reader = upstream.body!.getReader();
+interface ActiveUpstream {
+  firstText: string;
+  reader: ReadableStreamDefaultReader<Uint8Array>;
+  initialBuf: string;
+}
+
+async function startUpstreamStream(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  messagesPayload: unknown[],
+  firstTokenTimeoutMs: number
+): Promise<ActiveUpstream | null> {
+  const ac = new AbortController();
+  const overallTimer = setTimeout(() => ac.abort(), 90000);
+  let firstTokenTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => ac.abort(), firstTokenTimeoutMs);
+  try {
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
+        'X-Title': 'ziwei-doushu',
+      },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        max_tokens: 4096,
+        reasoning_effort: EFFORT,
+        chat_template_kwargs: { enable_thinking: ENABLE_THINKING },
+        messages: messagesPayload,
+      }),
+    });
+    if (!res.ok || !res.body) {
+      if (firstTokenTimer) clearTimeout(firstTokenTimer);
+      clearTimeout(overallTimer);
+      return null;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        if (firstTokenTimer) clearTimeout(firstTokenTimer);
+        clearTimeout(overallTimer);
+        return null;
+      }
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') {
+          if (firstTokenTimer) clearTimeout(firstTokenTimer);
+          clearTimeout(overallTimer);
+          return null;
+        }
+        try {
+          const text = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (typeof text === 'string' && text) {
+            if (firstTokenTimer) {
+              clearTimeout(firstTokenTimer);
+              firstTokenTimer = null;
+            }
+            const restLines = lines.slice(i + 1).join('\n');
+            const initialBuf = restLines ? `${restLines}\n${buf}` : buf;
+            return { firstText: text, reader, initialBuf };
+          }
+        } catch {
+          /* skip malformed chunk */
+        }
+      }
+    }
+  } catch {
+    if (firstTokenTimer) clearTimeout(firstTokenTimer);
+    clearTimeout(overallTimer);
+    return null;
+  }
+}
+
+function proxyActiveStream(active: ActiveUpstream): Response {
+  const { firstText, reader, initialBuf } = active;
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
-  let buf = '';
+  let buf = initialBuf;
   let closed = false;
-  let sentAny = false;
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (s: string) => { if (!closed) controller.enqueue(encoder.encode(s)); };
@@ -82,28 +162,39 @@ function proxyStream(upstream: Response): Response {
         if (closed) return;
         closed = true;
         try {
-          if (!sentAny) send(sse('（本次解读生成失败或被截断，请重试一次。）'));
           send('data: [DONE]\n\n');
           controller.close();
         } catch { /* already closed */ }
       };
       send(': connected\n\n');
+      send(sse(firstText));
+
+      const processBufferLines = () => {
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6);
+          if (data === '[DONE]') {
+            finish();
+            reader.cancel().catch(() => {});
+            return true;
+          }
+          try {
+            const text = JSON.parse(data).choices?.[0]?.delta?.content;
+            if (typeof text === 'string' && text) send(sse(text));
+          } catch { /* skip malformed chunk */ }
+        }
+        return false;
+      };
+
       try {
+        if (processBufferLines()) return;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() ?? '';
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6);
-            if (data === '[DONE]') { finish(); reader.cancel().catch(() => {}); return; }
-            try {
-              const text = JSON.parse(data).choices?.[0]?.delta?.content;
-              if (typeof text === 'string' && text) { sentAny = true; send(sse(text)); }
-            } catch { /* skip malformed chunk */ }
-          }
+          if (processBufferLines()) return;
         }
         finish();
       } catch {
@@ -142,45 +233,15 @@ export async function POST(req: NextRequest) {
     ...safeMsgs,
   ];
 
-  async function callUpstream(baseUrl: string, apiKey: string, model: string) {
-    return fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(90000),
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
-        'X-Title': 'ziwei-doushu',
-      },
-      body: JSON.stringify({
-        model,
-        stream: true,
-        max_tokens: 4096,
-        reasoning_effort: EFFORT,
-        chat_template_kwargs: { enable_thinking: ENABLE_THINKING },
-        messages: messagesPayload,
-      }),
-    });
-  }
-
-  let upstream: Response | null = null;
-  try {
-    upstream = await callUpstream(BASE_URL, key, MODEL);
-  } catch {
-    upstream = null;
-  }
+  let active = await startUpstreamStream(BASE_URL, key, MODEL, messagesPayload, FIRST_TOKEN_TIMEOUT_MS);
 
   const fbKey = process.env.INTERPRET_FALLBACK_API_KEY;
-  if ((!upstream || !upstream.ok || !upstream.body) && FALLBACK_BASE_URL && fbKey && FALLBACK_MODEL) {
-    try {
-      upstream = await callUpstream(FALLBACK_BASE_URL, fbKey, FALLBACK_MODEL);
-    } catch {
-      upstream = null;
-    }
+  if (!active && FALLBACK_BASE_URL && fbKey && FALLBACK_MODEL) {
+    active = await startUpstreamStream(FALLBACK_BASE_URL, fbKey, FALLBACK_MODEL, messagesPayload, 25000);
   }
 
-  if (!upstream || !upstream.ok || !upstream.body) {
-    return new Response(`upstream ${upstream?.status ?? 'unreachable'}`, { status: 502 });
+  if (!active) {
+    return new Response('upstream unavailable', { status: 502 });
   }
-  return proxyStream(upstream);
+  return proxyActiveStream(active);
 }

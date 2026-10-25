@@ -1,4 +1,4 @@
-// /api/heming — 合盘 AI 分析后端，上游同 /api/interpret。
+// /api/heming — 合盘 AI 分析后端，上游同 /api/interpret（支援本地 DGX Spark 直连 + 首字逾时自动切换备援）。
 // 契约（app/heming/page.tsx）：
 //   POST { chartA, chartB, question? } → SSE `data: {"delta":{"text":…}}` … `data: [DONE]`
 import { NextRequest } from 'next/server';
@@ -9,6 +9,7 @@ const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.openai.com/v1';
 const MODEL = process.env.INTERPRET_MODEL || 'gpt-4o-mini';
 const EFFORT = process.env.INTERPRET_EFFORT || 'none';
 const ENABLE_THINKING = process.env.INTERPRET_THINKING === 'true';
+const FIRST_TOKEN_TIMEOUT_MS = Number(process.env.INTERPRET_FIRST_TOKEN_TIMEOUT_MS || 4500);
 
 const FALLBACK_BASE_URL = process.env.INTERPRET_FALLBACK_BASE_URL || '';
 const FALLBACK_MODEL = process.env.INTERPRET_FALLBACK_MODEL || '';
@@ -23,6 +24,91 @@ const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）合盘
 function clip(obj: unknown, max = 12000): string {
   const s = obj ? JSON.stringify(obj) : '';
   return s.length > max ? s.slice(0, max) + '…(截断)' : s;
+}
+
+interface ActiveUpstream {
+  firstText: string;
+  reader: ReadableStreamDefaultReader<Uint8Array>;
+  initialBuf: string;
+}
+
+async function startUpstreamStream(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  messagesPayload: unknown[],
+  firstTokenTimeoutMs: number
+): Promise<ActiveUpstream | null> {
+  const ac = new AbortController();
+  const overallTimer = setTimeout(() => ac.abort(), 90000);
+  let firstTokenTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => ac.abort(), firstTokenTimeoutMs);
+  try {
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
+        'X-Title': 'ziwei-doushu',
+      },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        max_tokens: 4096,
+        reasoning_effort: EFFORT,
+        chat_template_kwargs: { enable_thinking: ENABLE_THINKING },
+        messages: messagesPayload,
+      }),
+    });
+    if (!res.ok || !res.body) {
+      if (firstTokenTimer) clearTimeout(firstTokenTimer);
+      clearTimeout(overallTimer);
+      return null;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        if (firstTokenTimer) clearTimeout(firstTokenTimer);
+        clearTimeout(overallTimer);
+        return null;
+      }
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') {
+          if (firstTokenTimer) clearTimeout(firstTokenTimer);
+          clearTimeout(overallTimer);
+          return null;
+        }
+        try {
+          const text = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (typeof text === 'string' && text) {
+            if (firstTokenTimer) {
+              clearTimeout(firstTokenTimer);
+              firstTokenTimer = null;
+            }
+            const restLines = lines.slice(i + 1).join('\n');
+            const initialBuf = restLines ? `${restLines}\n${buf}` : buf;
+            return { firstText: text, reader, initialBuf };
+          }
+        } catch {
+          /* skip malformed chunk */
+        }
+      }
+    }
+  } catch {
+    if (firstTokenTimer) clearTimeout(firstTokenTimer);
+    clearTimeout(overallTimer);
+    return null;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -47,53 +133,23 @@ export async function POST(req: NextRequest) {
     },
   ];
 
-  async function callUpstream(baseUrl: string, apiKey: string, model: string) {
-    return fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(90000),
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
-        'X-Title': 'ziwei-doushu',
-      },
-      body: JSON.stringify({
-        model,
-        stream: true,
-        max_tokens: 4096,
-        reasoning_effort: EFFORT,
-        chat_template_kwargs: { enable_thinking: ENABLE_THINKING },
-        messages: messagesPayload,
-      }),
-    });
-  }
-
-  let upstream: Response | null = null;
-  try {
-    upstream = await callUpstream(BASE_URL, key, MODEL);
-  } catch {
-    upstream = null;
-  }
+  let active = await startUpstreamStream(BASE_URL, key, MODEL, messagesPayload, FIRST_TOKEN_TIMEOUT_MS);
 
   const fbKey = process.env.INTERPRET_FALLBACK_API_KEY;
-  if ((!upstream || !upstream.ok || !upstream.body) && FALLBACK_BASE_URL && fbKey && FALLBACK_MODEL) {
-    try {
-      upstream = await callUpstream(FALLBACK_BASE_URL, fbKey, FALLBACK_MODEL);
-    } catch {
-      upstream = null;
-    }
+  if (!active && FALLBACK_BASE_URL && fbKey && FALLBACK_MODEL) {
+    active = await startUpstreamStream(FALLBACK_BASE_URL, fbKey, FALLBACK_MODEL, messagesPayload, 25000);
   }
 
-  if (!upstream || !upstream.ok || !upstream.body) {
-    return new Response(`upstream ${upstream?.status ?? 'unreachable'}`, { status: 502 });
+  if (!active) {
+    return new Response('upstream unavailable', { status: 502 });
   }
 
-  const reader = upstream.body.getReader();
+  const { firstText, reader, initialBuf } = active;
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
-  let buf = '';
+  let buf = initialBuf;
   let closed = false;
-  let sentAny = false;
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (s: string) => { if (!closed) controller.enqueue(encoder.encode(s)); };
@@ -101,31 +157,41 @@ export async function POST(req: NextRequest) {
         if (closed) return;
         closed = true;
         try {
-          if (!sentAny) send(`data: ${JSON.stringify({ delta: { text: '（本次分析生成失败或被截断，请重试一次。）' } })}\n\n`);
           send('data: [DONE]\n\n');
           controller.close();
         } catch { /* already closed */ }
       };
       send(': connected\n\n');
+      send(`data: ${JSON.stringify({ delta: { text: firstText } })}\n\n`);
+
+      const processBufferLines = () => {
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6);
+          if (data === '[DONE]') {
+            finish();
+            reader.cancel().catch(() => {});
+            return true;
+          }
+          try {
+            const text = JSON.parse(data).choices?.[0]?.delta?.content;
+            if (typeof text === 'string' && text) {
+              send(`data: ${JSON.stringify({ delta: { text } })}\n\n`);
+            }
+          } catch { /* skip malformed chunk */ }
+        }
+        return false;
+      };
+
       try {
+        if (processBufferLines()) return;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() ?? '';
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6);
-            if (data === '[DONE]') { finish(); reader.cancel().catch(() => {}); return; }
-            try {
-              const text = JSON.parse(data).choices?.[0]?.delta?.content;
-              if (typeof text === 'string' && text) {
-                sentAny = true;
-                send(`data: ${JSON.stringify({ delta: { text } })}\n\n`);
-              }
-            } catch { /* skip malformed chunk */ }
-          }
+          if (processBufferLines()) return;
         }
         finish();
       } catch {
