@@ -4,6 +4,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import type { ZiweiChart, Palace } from '@/lib/ziwei/types';
 import type { TopicKey } from '@/lib/ziwei/db-analysis';
 import type { TimeView } from './TimeNav';
+import { PRESET_QUESTIONS, pickQuestions } from '@/lib/ziwei/preset-questions';
+import { isSubmitShortcut, SUBMIT_HINT } from '@/lib/submit-shortcut';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -21,6 +23,8 @@ interface InsightPanelProps {
   chart: ZiweiChart;
   selectedPalace?: Palace | null;
   selectedSiHua?: SelectedSiHua | null;
+  /** 面板被隱藏時為 true：只記錄選宮，不觸發 AI 分析 */
+  paused?: boolean;
 }
 
 interface DatasetApiRecord {
@@ -222,7 +226,7 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
         if (sectionMatch) {
           return (
             <div key={i} className="pt-3 pb-0.5 first:pt-0">
-              <span className="text-[11px] font-semibold tracking-wide" style={{ color: 'var(--t-gold)' }}>
+              <span className="text-fs-12 font-semibold tracking-wide" style={{ color: 'var(--t-gold)' }}>
                 【{sectionMatch[1]}】
               </span>
             </div>
@@ -231,7 +235,7 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
         if (line.trim() === '') return <div key={i} className="h-1" />;
         const parts = line.split(/\*\*(.+?)\*\*/);
         return (
-          <div key={i} className="text-[11px] leading-relaxed" style={{ color: 'var(--t-text2)' }}>
+          <div key={i} className="text-fs-12 leading-relaxed" style={{ color: 'var(--t-text2)' }}>
             {parts.map((part, j) =>
               j % 2 === 0
                 ? part
@@ -250,7 +254,7 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
   );
 }
 
-export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: InsightPanelProps) {
+export default function InsightPanel({ chart, selectedPalace, selectedSiHua, paused = false }: InsightPanelProps) {
   const canUseDataset = chart.birthInfo.year >= 1950 && chart.birthInfo.year <= 2026;
   const [panelTab, setPanelTab] = useState<'dataset' | 'ai'>(canUseDataset ? 'dataset' : 'ai');
   const [activeTopic, setActiveTopic] = useState<TopicKey>('overview');
@@ -259,7 +263,6 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
   const [datasetRecord, setDatasetRecord] = useState<DatasetApiRecord | null>(null);
   const [datasetLoading, setDatasetLoading] = useState(false);
   const [datasetError, setDatasetError] = useState('');
-  const [engineMode, setEngineMode] = useState<'sqlite' | 'zst-onfly'>('sqlite');
 
   // AI chat state
   const [messages, setMessages] = useState<Message[]>([]);
@@ -271,12 +274,14 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
   const lastPalaceBranch = useRef<number | undefined>(undefined);
   const lastSiHuaKey = useRef<string | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { loadingRef.current = loading; }, [loading]);
 
   // Fetch dataset reading
-  const loadDataset = useCallback(async (mode: 'sqlite' | 'zst-onfly', nocache = false) => {
+  const loadDataset = useCallback(async () => {
     if (!canUseDataset) return;
     setDatasetLoading(true);
     setDatasetError('');
@@ -288,8 +293,7 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
         d: String(day),
         h: String(hour),
         g: gender,
-        mode: mode === 'sqlite' ? 'auto' : 'zst-onfly',
-        ...(nocache ? { nocache: '1' } : {}),
+        mode: 'auto',
       });
       const res = await fetch(`/api/dataset?${qs.toString()}`);
       const data = await res.json();
@@ -313,11 +317,25 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
 
   useEffect(() => {
     if (canUseDataset) {
-      loadDataset(engineMode, false);
+      loadDataset();
     } else {
       setPanelTab('ai');
     }
-  }, [canUseDataset, chart.birthInfo, engineMode, loadDataset]);
+  }, [canUseDataset, chart.birthInfo, loadDataset]);
+
+  // 換領域時重抽預設提問
+  useEffect(() => {
+    setSuggestions(pickQuestions(PRESET_QUESTIONS[activeTopic], 3));
+  }, [activeTopic]);
+
+  // 輸入框隨內容長高（上限由 CSS max-height 控制）；空白或面板隱藏時交回 rows 決定高度
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = '';
+    if (!input || el.scrollHeight === 0) return;
+    el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+  }, [input, paused]);
 
   // Auto-scroll when AI messages update
   useEffect(() => {
@@ -406,6 +424,7 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
   useEffect(() => {
     if (!selectedPalace || selectedPalace.branch === lastPalaceBranch.current) return;
     lastPalaceBranch.current = selectedPalace.branch;
+    if (paused) return;
 
     const mappedTopic = PALACE_TO_TOPIC[selectedPalace.name];
     if (panelTab === 'dataset' && mappedTopic && datasetRecord) {
@@ -436,7 +455,7 @@ ${selectedPalace.name}在命盘中的意义，以及这种星曜配置的整体�
     setPanelTab('ai');
     aiAutoLoaded.current = true;
     sendMessage(prompt, true);
-  }, [selectedPalace, panelTab, datasetRecord, sendMessage]);
+  }, [selectedPalace, panelTab, datasetRecord, sendMessage, paused]);
 
   // 注入四化飞化分析
   useEffect(() => {
@@ -473,28 +492,23 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
     sendMessage(prompt, true);
   }, [selectedSiHua, chart.palaces, sendMessage]);
 
-  const handleTopicClick = (topicKey: TopicKey) => {
-    setActiveTopic(topicKey);
-    if (panelTab === 'ai') {
-      if (loadingRef.current) return;
-      const label = ALL_TOPICS.find(t => t.key === topicKey)?.label || topicKey;
-      const prompt = TOPIC_PROMPTS[topicKey] || `請依倪海廈《天紀》體系深度分析此命盤的【${label}】運勢與格局要點。`;
-      sendMessage(prompt, true);
-    }
-  };
+  const activeLabel = ALL_TOPICS.find(t => t.key === activeTopic)?.label || activeTopic;
 
-  const handleSend = () => {
-    if (!input.trim() || loadingRef.current) return;
+  /** 送出提問並切到 AI 分頁（預設提問、完整分析、對話框共用） */
+  const ask = (text: string, hidden = false) => {
+    if (!text.trim() || loadingRef.current) return;
     setPanelTab('ai');
     aiAutoLoaded.current = true;
-    sendMessage(input);
+    sendMessage(text, hidden);
   };
 
+  const handleTopicAnalysis = () => {
+    ask(TOPIC_PROMPTS[activeTopic] || `請依倪海廈《天紀》體系深度分析此命盤的【${activeLabel}】運勢與格局要點。`, true);
+  };
+
+  const handleSend = () => ask(input);
+
   const currentTopicText = datasetRecord?.c?.[activeTopic] || '';
-  const currentTopicChars = datasetRecord?.t?.[activeTopic] ?? currentTopicText.length;
-  const totalChartChars = datasetRecord
-    ? Object.values(datasetRecord.t || {}).reduce((a, b) => a + b, 0)
-    : 0;
 
   return (
     <div className="flex flex-col h-full rounded-xl overflow-hidden card-glass">
@@ -506,20 +520,20 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
             <button
               type="button"
               onClick={() => setPanelTab('dataset')}
-              className="flex-1 py-1.5 px-2 text-[11px] font-semibold rounded-lg transition-all"
+              className="flex-1 py-1.5 px-2 text-fs-12 font-semibold rounded-lg transition-all"
               style={{
                 background: panelTab === 'dataset' ? 'rgba(212,168,67,0.16)' : 'transparent',
                 border: `1px solid ${panelTab === 'dataset' ? 'rgba(212,168,67,0.4)' : 'var(--t-border)'}`,
                 color: panelTab === 'dataset' ? 'var(--t-gold)' : 'var(--t-faint)',
               }}
             >
-              📚 典籍詳批（13維秒出）
+              📚 典籍詳批
             </button>
           )}
           <button
             type="button"
             onClick={() => setPanelTab('ai')}
-            className="flex-1 py-1.5 px-2 text-[11px] font-semibold rounded-lg transition-all"
+            className="flex-1 py-1.5 px-2 text-fs-12 font-semibold rounded-lg transition-all"
             style={{
               background: panelTab === 'ai' ? 'rgba(212,168,67,0.16)' : 'transparent',
               border: `1px solid ${panelTab === 'ai' ? 'rgba(212,168,67,0.4)' : 'var(--t-border)'}`,
@@ -540,9 +554,8 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
               <button
                 key={t.key}
                 type="button"
-                onClick={() => handleTopicClick(t.key)}
-                disabled={panelTab === 'ai' && loading}
-                className="py-1 text-[10px] font-medium rounded-md transition-all duration-150 disabled:opacity-40"
+                onClick={() => setActiveTopic(t.key)}
+                className="py-1 text-fs-12 font-medium rounded-md transition-all duration-150"
                 style={{
                   background: isActive ? 'rgba(212,168,67,0.14)' : 'transparent',
                   border: `1px solid ${isActive ? 'rgba(212,168,67,0.35)' : 'var(--t-border)'}`,
@@ -556,67 +569,16 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
         </div>
       </div>
 
-      {/* ── Engine Telemetry Bar (Dataset Mode) ── */}
-      {panelTab === 'dataset' && (
-        <div
-          className="flex-shrink-0 px-3 py-1.5 flex items-center justify-between gap-2 text-[10px]"
-          style={{ borderBottom: '1px solid var(--t-border)', background: 'rgba(212,168,67,0.04)', color: 'var(--t-faint)' }}
-        >
-          <span>
-            {datasetLoading ? (
-              '⚡ 解壓讀取中…'
-            ) : datasetRecord ? (
-              <>
-                ⚡ <strong>{datasetRecord._engine.source === 'sqlite-zstd' ? 'SQLite+Zstd' : '.zst 即時解壓'}</strong>
-                {' · '}
-                <span style={{ color: 'var(--t-gold)' }}>{datasetRecord._engine.elapsedMs}ms</span>
-                {datasetRecord._engine.cacheHit ? ' (快取)' : ' (冷讀)'}
-                {' · '}
-                本維 {currentTopicChars.toLocaleString()} 字 / 全盤 {totalChartChars.toLocaleString()} 字
-              </>
-            ) : (
-              datasetError || '無資料'
-            )}
-          </span>
-          <div className="flex gap-1">
-            <button
-              type="button"
-              onClick={() => { setEngineMode('sqlite'); loadDataset('sqlite', true); }}
-              className="px-1.5 py-0.5 rounded text-[9px]"
-              style={{
-                border: `1px solid ${engineMode === 'sqlite' ? 'rgba(212,168,67,0.4)' : 'var(--t-border)'}`,
-                color: engineMode === 'sqlite' ? 'var(--t-gold)' : 'var(--t-faint)',
-              }}
-              title="從去重字典 SQLite+Zstd 區塊讀取（冷讀 ~2ms）"
-            >
-              SQLite
-            </button>
-            <button
-              type="button"
-              onClick={() => { setEngineMode('zst-onfly'); loadDataset('zst-onfly', true); }}
-              className="px-1.5 py-0.5 rounded text-[9px]"
-              style={{
-                border: `1px solid ${engineMode === 'zst-onfly' ? 'rgba(212,168,67,0.4)' : 'var(--t-border)'}`,
-                color: engineMode === 'zst-onfly' ? 'var(--t-gold)' : 'var(--t-faint)',
-              }}
-              title="直接串流解壓原始 year-YYYY.jsonl.zst（不經 DB）"
-            >
-              .zst直讀
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* ── Content Area ── */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0" style={{ maxHeight: '72vh' }}>
         {panelTab === 'dataset' ? (
           datasetLoading ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <div className="text-4xl mb-3" style={{ color: 'var(--t-gold)', opacity: 0.1 }}>✦</div>
-              <p className="text-[11px] animate-pulse" style={{ color: 'var(--t-faint)' }}>正在從壓縮庫即時解碼 13 維斷語…</p>
+              <p className="text-fs-12 animate-pulse" style={{ color: 'var(--t-faint)' }}>典籍斷語載入中…</p>
             </div>
           ) : datasetError ? (
-            <div className="text-[11px] py-8 text-center" style={{ color: 'var(--t-faint)' }}>
+            <div className="text-fs-12 py-8 text-center" style={{ color: 'var(--t-faint)' }}>
               {datasetError}
             </div>
           ) : (
@@ -627,7 +589,7 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="text-4xl mb-3" style={{ color: 'var(--t-gold)', opacity: 0.1 }}>✦</div>
-                <p className="text-[10px] animate-pulse" style={{ color: 'var(--t-faint)' }}>命格解读生成中…</p>
+                <p className="text-fs-12 animate-pulse" style={{ color: 'var(--t-faint)' }}>命格解读生成中…</p>
               </div>
             )}
 
@@ -644,7 +606,7 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
                       className="flex justify-end"
                     >
                       <div
-                        className="max-w-[85%] rounded-xl px-3 py-2 text-[11px]"
+                        className="max-w-[85%] rounded-xl px-3 py-2 text-fs-12 whitespace-pre-wrap"
                         style={{
                           background: 'rgba(212,168,67,0.08)',
                           border: '1px solid rgba(212,168,67,0.18)',
@@ -665,11 +627,11 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
                     animate={{ opacity: 1, y: 0 }}
                   >
                     <div
-                      className="text-[9px] tracking-widest mb-2 flex items-center gap-1.5"
+                      className="text-fs-10 tracking-widest mb-2 flex items-center gap-1.5"
                       style={{ color: 'var(--t-faint)' }}
                     >
                       <span style={{ color: 'var(--t-gold)', opacity: 0.4 }}>✦</span>
-                      AI 命理解讀（已注入 v4.0 斷語 RAG）
+                      AI 命理解讀
                     </div>
                     <AiContent text={msg.content} streaming={loading && isLastMsg} />
                   </motion.div>
@@ -680,37 +642,82 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
         )}
       </div>
 
-      {/* ── Input ── */}
-      <div className="flex-shrink-0 px-3 pb-3 pt-2" style={{ borderTop: '1px solid var(--t-border)' }}>
-        <div className="flex gap-2">
-          <input
-            type="text"
+      {/* ── 預設提問 + 對話框 ── */}
+      <div className="flex-shrink-0 px-3 pb-3 pt-2 space-y-2" style={{ borderTop: '1px solid var(--t-border)' }}>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={handleTopicAnalysis}
+            disabled={loading}
+            className="px-2.5 py-1 rounded-full text-fs-11 font-medium transition-all disabled:opacity-40"
+            style={{
+              background: 'rgba(212,168,67,0.14)',
+              border: '1px solid rgba(212,168,67,0.35)',
+              color: 'var(--t-gold)',
+            }}
+          >
+            📜 完整分析【{activeLabel}】
+          </button>
+          {suggestions.map(q => (
+            <button
+              key={q}
+              type="button"
+              onClick={() => ask(q)}
+              disabled={loading}
+              className="px-2.5 py-1 rounded-full text-fs-11 text-left transition-all disabled:opacity-40 hover:brightness-110"
+              style={{ border: '1px solid var(--t-border)', color: 'var(--t-text2)' }}
+            >
+              {q}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setSuggestions(pickQuestions(PRESET_QUESTIONS[activeTopic], 3))}
+            className="px-2 py-1 rounded-full text-fs-11 transition-all"
+            style={{ border: '1px dashed var(--t-border)', color: 'var(--t-faint)' }}
+            title="換一批題目"
+          >
+            🎲 換一批
+          </button>
+        </div>
+        <div className="flex gap-2 items-end">
+          <textarea
+            ref={inputRef}
+            rows={2}
             value={input}
             onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
-            placeholder="繼續追問 AI（自動引用本盤 13 維斷語），如：今年適合換工作嗎？"
+            onKeyDown={e => {
+              if (isSubmitShortcut(e.nativeEvent)) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            placeholder="直接問 AI，如：今年適合換工作嗎？"
             disabled={loading}
-            className="flex-1 rounded-lg px-3 py-2 text-[11px] focus:outline-none transition-colors"
+            className="flex-1 rounded-lg px-3 py-2 text-fs-12 leading-relaxed resize-none focus:outline-none transition-colors"
             style={{
-              background: 'var(--t-card)',
+              background: 'var(--t-bg)',
               border: '1px solid var(--t-border)',
               color: 'var(--t-text)',
+              maxHeight: '8.5em',
+              overflowY: 'auto',
             }}
           />
           <button
             type="button"
             onClick={handleSend}
             disabled={loading || !input.trim()}
-            className="px-3 py-2 rounded-lg text-[11px] font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            className="px-3 py-2 rounded-lg text-fs-12 font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
             style={{
               background: 'rgba(212,168,67,0.15)',
               border: '1px solid rgba(212,168,67,0.25)',
               color: 'var(--t-gold)',
             }}
           >
-            {loading ? '…' : '追問'}
+            {loading ? '…' : '送出'}
           </button>
         </div>
+        <div className="text-fs-10 text-right" style={{ color: 'var(--t-faint)' }}>{SUBMIT_HINT}</div>
       </div>
 
     </div>

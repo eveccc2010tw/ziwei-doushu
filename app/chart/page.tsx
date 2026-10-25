@@ -3,9 +3,9 @@ import { useCallback, useEffect, useState } from 'react';
 import BirthForm, { type BirthFormState } from '@/components/BirthForm';
 import ChartBoard from '@/components/ChartBoard';
 import InsightPanel from '@/components/InsightPanel';
-import TimeNav, { type TimeView } from '@/components/TimeNav';
 import ShareCardCanvas, { captureShareCard, downloadDataURL } from '@/components/ShareCardCanvas';
 import { useHistory } from '@/lib/ziwei/history';
+import { useChartPrefs, FONT_STEPS } from '@/lib/ziwei/chart-prefs';
 import { generateChart } from '@/lib/ziwei/algorithm';
 import type { BirthInfo, ZiweiChart, Palace } from '@/lib/ziwei/types';
 
@@ -23,18 +23,20 @@ interface CaseRow {
  * 1. 瀏覽器歷史（localStorage，最近 10 筆）
  * 2. 案件（server 端 /api/cases，跨裝置）
  * 3. 分享卡 PNG 下載
+ * 4. 字級 A−／A＋、命盤／解讀顯示切換（本機記憶）
  * 介面文字以繁體撰寫；其餘簡體字串由 Traditionalizer 於顯示層轉換。
  */
 export default function ChartPage() {
   const [chart, setChart] = useState<ZiweiChart | null>(null);
   const [selectedPalace, setSelectedPalace] = useState<Palace | null>(null);
-  const [view, setView] = useState<TimeView>('mingpan');
-  const [liunianYear, setLiunianYear] = useState(() => new Date().getFullYear());
   const [lastForm, setLastForm] = useState<BirthFormState | null>(null);
   const [prefill, setPrefill] = useState<Partial<BirthFormState> | null>(null);
   const [formKey, setFormKey] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const { history, save, remove } = useHistory();
+  const { fontStep, fontScale, changeFont, layout, toggle } = useChartPrefs();
+  const showChart = layout !== 'insight';
+  const showInsight = layout !== 'chart';
 
   // ── 案件（server 端）──
   const [cases, setCases] = useState<CaseRow[]>([]);
@@ -243,6 +245,19 @@ export default function ChartPage() {
           📁 {caseFormOpen ? '取消儲存' : '儲存為案件'}
         </button>
         {caseMsg && <span style={{ fontSize: 13, color: '#7a9a54' }}>{caseMsg}</span>}
+
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={prefGroupStyle} role="group" aria-label="字級">
+            <button type="button" onClick={() => changeFont(-1)} disabled={fontStep === 0} style={{ ...prefBtnStyle(false), opacity: fontStep === 0 ? 0.35 : 1 }} aria-label="縮小字級">A−</button>
+            <span style={{ fontSize: 13, color: 'var(--t-faint)', minWidth: 32, textAlign: 'center' }}>{FONT_STEPS[fontStep].label}</span>
+            <button type="button" onClick={() => changeFont(1)} disabled={fontStep === FONT_STEPS.length - 1} style={{ ...prefBtnStyle(false), opacity: fontStep === FONT_STEPS.length - 1 ? 0.35 : 1 }} aria-label="放大字級">A+</button>
+          </div>
+          <div style={prefGroupStyle} role="group" aria-label="顯示">
+            {/* 只剩一側顯示時，該側按鈕停用（兩側不能同時隱藏） */}
+            <button type="button" onClick={() => toggle('chart')} aria-pressed={showChart} disabled={layout === 'chart'} style={{ ...prefBtnStyle(showChart), cursor: layout === 'chart' ? 'default' : 'pointer' }}>命盤</button>
+            <button type="button" onClick={() => toggle('insight')} aria-pressed={showInsight} disabled={layout === 'insight'} style={{ ...prefBtnStyle(showInsight), cursor: layout === 'insight' ? 'default' : 'pointer' }}>解讀</button>
+          </div>
+        </div>
       </div>
 
       {caseFormOpen && lastForm && (
@@ -279,23 +294,19 @@ export default function ChartPage() {
         </div>
       )}
 
-      <TimeNav
-        chart={chart}
-        view={view}
-        liunianYear={liunianYear}
-        onViewChange={setView}
-        onYearChange={setLiunianYear}
-      />
-
+      {/* 兩側都保持掛載（隱藏只是不顯示），對話紀錄與選宮狀態不會因切換而消失 */}
       <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 380px)',
-          gap: 20, marginTop: 16, alignItems: 'start',
-        }}
+        className="ziwei-workspace"
+        data-layout={layout}
+        style={{ '--t-fs': fontScale } as React.CSSProperties}
       >
-        <ChartBoard chart={chart} onPalaceSelect={setSelectedPalace} />
-        <InsightPanel chart={chart} selectedPalace={selectedPalace} />
+        <div hidden={!showChart}>
+          <ChartBoard chart={chart} onPalaceSelect={setSelectedPalace} />
+        </div>
+        <div className="ziwei-insight" hidden={!showInsight}>
+          {/* 解讀隱藏時點宮位只同步選取，不觸發 AI 分析 */}
+          <InsightPanel chart={chart} selectedPalace={selectedPalace} paused={!showInsight} />
+        </div>
       </div>
 
       {/* 分享卡隱藏渲染：html2canvas 依 DOM 截圖，放在視窗外即可 */}
@@ -320,4 +331,17 @@ export default function ChartPage() {
       )}
     </main>
   );
+}
+
+const prefGroupStyle: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 2, padding: 2,
+  border: '1px solid var(--t-border)', borderRadius: 8,
+};
+
+function prefBtnStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: '4px 10px', cursor: 'pointer', borderRadius: 6, border: 'none', fontSize: 13,
+    background: active ? 'rgba(212,168,67,0.16)' : 'transparent',
+    color: active ? 'var(--t-gold)' : 'var(--t-faint)',
+  };
 }

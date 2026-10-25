@@ -37,6 +37,10 @@ const config: Config = {
         sans: ["var(--font)"],
         mono: ["var(--font-mono)"],
       },
+      // 命盤／解讀面板字級：乘上 --t-fs（命盤頁 A−／A＋ 切換），容器外預設 1
+      fontSize: Object.fromEntries(
+        [7, 8, 9, 10, 11, 12, 13, 14, 15, 16].map((px) => [`fs-${px}`, `calc(${px}px * var(--t-fs, 1))`]),
+      ),
       boxShadow: {
         xs: "0 1px 2px rgba(0,0,0,0.05)",
         sm: "0 2px 8px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04)",

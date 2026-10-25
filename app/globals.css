@@ -90,6 +90,68 @@
   --bg-page: #020810;
 }
 
+/* ─── 命盤／解讀面板 Token（--t-*，ChartBoard、PalaceCell、InsightPanel 等使用）── */
+:root {
+  --t-bg: #FFFDF8;
+  --t-surface: #F4F1E8;
+  --t-card: #FFFFFF;
+  --t-border: rgba(138,104,30,0.22);
+  --t-border-acc: rgba(154,116,32,0.45);
+  --t-gold: #9A7420;
+  --t-text: #1A1A18;
+  --t-text1: #1A1A18;
+  --t-text2: #4A4A45;
+  --t-faint: #85857D;
+  --t-star-bright: #A85A06;
+  --t-star: #C27A0E;
+  --t-star-dim: #9A8C7A;
+  --t-lucky: #1F6FA8;
+  --t-sha: #B4362C;
+}
+[data-theme="dark"] {
+  --t-bg: #07101F;
+  --t-surface: #0C1628;
+  --t-card: #091324;
+  --t-border: rgba(212,168,67,0.18);
+  --t-border-acc: rgba(212,168,67,0.40);
+  --t-gold: #D4A843;
+  --t-text: #E8EEF6;
+  --t-text1: #E8EEF6;
+  --t-text2: #B4C2D8;
+  --t-faint: #7D8BA6;
+  --t-star-bright: #FCD34D;
+  --t-star: #F5A524;
+  --t-star-dim: #B48A3E;
+  --t-lucky: #6CB8E6;
+  --t-sha: #F07A72;
+}
+
+.card-glass {
+  background: var(--t-card);
+  border: 1px solid var(--t-border);
+  box-shadow: var(--sh-sm);
+}
+
+/* 命盤頁工作區：命盤＋解讀並排；只留一側時單欄；窄螢幕一律單欄 */
+.ziwei-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 400px);
+  gap: 20px;
+  align-items: start;
+}
+.ziwei-workspace[data-layout="chart"],
+.ziwei-workspace[data-layout="insight"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ziwei-workspace[data-layout="insight"] > .ziwei-insight {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+}
+@media (max-width: 960px) {
+  .ziwei-workspace { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ─── 全局基础 ───────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 

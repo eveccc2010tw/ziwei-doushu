@@ -6,6 +6,7 @@ import { formToBirthInfo } from '@/lib/ziwei/share';
 import { generateChart as buildChart } from '@/lib/ziwei/algorithm';
 import type { BirthInfo, ZiweiChart } from '@/lib/ziwei/types';
 import { useTheme } from '@/components/ThemeProvider';
+import { isSubmitShortcut, SUBMIT_HINT } from '@/lib/submit-shortcut';
 
 // ─── AiContent 渲染器（与 InsightPanel 一致）────────────────
 function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
@@ -329,16 +330,21 @@ export default function HemingPage() {
             </div>
 
             {/* 输入框 + 追问按钮 */}
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <input
-                type="text"
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+              <textarea
+                rows={2}
                 value={question}
                 onChange={e => setQuestion(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && !analyzing) runAnalysis(question || undefined); }}
+                onKeyDown={e => {
+                  if (isSubmitShortcut(e.nativeEvent) && !analyzing) {
+                    e.preventDefault();
+                    runAnalysis(question || undefined);
+                  }
+                }}
                 placeholder="继续追问，如：哪几年是两人感情关键期？"
                 disabled={analyzing}
                 className="input-base"
-                style={{ fontSize: '13px', flex: 1 }}
+                style={{ fontSize: '13px', flex: 1, resize: 'vertical' }}
               />
               <button
                 onClick={() => runAnalysis(question || undefined)}
@@ -355,6 +361,7 @@ export default function HemingPage() {
                 {analyzing ? '分析中…' : '继续追问'}
               </button>
             </div>
+            <div style={{ fontSize: '11px', color: 'var(--tx-3)', textAlign: 'right' }}>{SUBMIT_HINT}</div>
           </div>
         )}
       </div>
