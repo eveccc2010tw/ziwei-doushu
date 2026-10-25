@@ -7,7 +7,11 @@ export const runtime = 'nodejs';
 
 const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.openai.com/v1';
 const MODEL = process.env.INTERPRET_MODEL || 'gpt-4o-mini';
-const EFFORT = process.env.INTERPRET_EFFORT || 'low';
+const EFFORT = process.env.INTERPRET_EFFORT || 'none';
+const ENABLE_THINKING = process.env.INTERPRET_THINKING === 'true';
+
+const FALLBACK_BASE_URL = process.env.INTERPRET_FALLBACK_BASE_URL || '';
+const FALLBACK_MODEL = process.env.INTERPRET_FALLBACK_MODEL || '';
 
 const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）合盘分析助手。
 规则：
@@ -33,32 +37,56 @@ export async function POST(req: NextRequest) {
     if (typeof body.question === 'string') question = body.question.slice(0, 500);
   } catch { /* fallthrough */ }
 
-  const upstream = await fetch(`${BASE_URL}/chat/completions`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(120000),
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${key}`,
-      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
-      'X-Title': 'ziwei-doushu',
+  const messagesPayload = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content:
+        `盘A(JSON)：\n${clip(chartA)}\n\n盘B(JSON)：\n${clip(chartB)}\n\n` +
+        (question ? `重点关注问题：${question}` : '请给出两盘合盘分析。'),
     },
-    body: JSON.stringify({
-      model: MODEL,
-      stream: true,
-      max_tokens: 8192,
-      reasoning_effort: EFFORT,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content:
-            `盘A(JSON)：\n${clip(chartA)}\n\n盘B(JSON)：\n${clip(chartB)}\n\n` +
-            (question ? `重点关注问题：${question}` : '请给出两盘合盘分析。'),
-        },
-      ],
-    }),
-  });
-  if (!upstream.ok || !upstream.body) return new Response(`upstream ${upstream.status}`, { status: 502 });
+  ];
+
+  async function callUpstream(baseUrl: string, apiKey: string, model: string) {
+    return fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(90000),
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
+        'X-Title': 'ziwei-doushu',
+      },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        max_tokens: 4096,
+        reasoning_effort: EFFORT,
+        chat_template_kwargs: { enable_thinking: ENABLE_THINKING },
+        messages: messagesPayload,
+      }),
+    });
+  }
+
+  let upstream: Response | null = null;
+  try {
+    upstream = await callUpstream(BASE_URL, key, MODEL);
+  } catch {
+    upstream = null;
+  }
+
+  const fbKey = process.env.INTERPRET_FALLBACK_API_KEY;
+  if ((!upstream || !upstream.ok || !upstream.body) && FALLBACK_BASE_URL && fbKey && FALLBACK_MODEL) {
+    try {
+      upstream = await callUpstream(FALLBACK_BASE_URL, fbKey, FALLBACK_MODEL);
+    } catch {
+      upstream = null;
+    }
+  }
+
+  if (!upstream || !upstream.ok || !upstream.body) {
+    return new Response(`upstream ${upstream?.status ?? 'unreachable'}`, { status: 502 });
+  }
 
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();

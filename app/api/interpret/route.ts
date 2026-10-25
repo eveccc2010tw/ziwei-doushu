@@ -8,7 +8,11 @@ export const runtime = 'nodejs';
 
 const BASE_URL = process.env.INTERPRET_BASE_URL || 'https://api.openai.com/v1';
 const MODEL = process.env.INTERPRET_MODEL || 'gpt-4o-mini';
-const EFFORT = process.env.INTERPRET_EFFORT || 'low';
+const EFFORT = process.env.INTERPRET_EFFORT || 'none';
+const ENABLE_THINKING = process.env.INTERPRET_THINKING === 'true';
+
+const FALLBACK_BASE_URL = process.env.INTERPRET_FALLBACK_BASE_URL || '';
+const FALLBACK_MODEL = process.env.INTERPRET_FALLBACK_MODEL || '';
 
 const SYSTEM_PROMPT = `你是紫微斗数（倪海厦《天纪》体系）命盘解读助手。
 规则：
@@ -133,26 +137,50 @@ export async function POST(req: NextRequest) {
   const lastUserContent = [...safeMsgs].reverse().find(m => m.role === 'user')?.content || '';
   const ragCtx = await buildDatasetRagSnippet(chart, lastUserContent);
 
-  const upstream = await fetch(`${BASE_URL}/chat/completions`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(120000),
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${key}`,
-      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
-      'X-Title': 'ziwei-doushu',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      stream: true,
-      max_tokens: 8192,
-      reasoning_effort: EFFORT,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT + (chartCtx ? `\n\n当前命盘数据(JSON)：\n${chartCtx}` : '') + ragCtx },
-        ...safeMsgs,
-      ],
-    }),
-  });
-  if (!upstream.ok || !upstream.body) return new Response(`upstream ${upstream.status}`, { status: 502 });
+  const messagesPayload = [
+    { role: 'system', content: SYSTEM_PROMPT + (chartCtx ? `\n\n当前命盘数据(JSON)：\n${chartCtx}` : '') + ragCtx },
+    ...safeMsgs,
+  ];
+
+  async function callUpstream(baseUrl: string, apiKey: string, model: string) {
+    return fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(90000),
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
+        'X-Title': 'ziwei-doushu',
+      },
+      body: JSON.stringify({
+        model,
+        stream: true,
+        max_tokens: 4096,
+        reasoning_effort: EFFORT,
+        chat_template_kwargs: { enable_thinking: ENABLE_THINKING },
+        messages: messagesPayload,
+      }),
+    });
+  }
+
+  let upstream: Response | null = null;
+  try {
+    upstream = await callUpstream(BASE_URL, key, MODEL);
+  } catch {
+    upstream = null;
+  }
+
+  const fbKey = process.env.INTERPRET_FALLBACK_API_KEY;
+  if ((!upstream || !upstream.ok || !upstream.body) && FALLBACK_BASE_URL && fbKey && FALLBACK_MODEL) {
+    try {
+      upstream = await callUpstream(FALLBACK_BASE_URL, fbKey, FALLBACK_MODEL);
+    } catch {
+      upstream = null;
+    }
+  }
+
+  if (!upstream || !upstream.ok || !upstream.body) {
+    return new Response(`upstream ${upstream?.status ?? 'unreachable'}`, { status: 502 });
+  }
   return proxyStream(upstream);
 }
