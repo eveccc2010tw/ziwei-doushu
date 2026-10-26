@@ -1,8 +1,8 @@
 /**
- * /knowledge/[star]/[topic] — SEO 落地页
+ * /knowledge/[star]/[topic] — 主星 × 宫位知识页
  *
  * 14 主星 × 13 topic = 182 个独立 URL
- * 每页含完整的 STAR_DB 4 段论断（一句话定调/核心论断/命盘依据/经典出处）
+ * 内容即时由压缩断语库（SQLite＋Zstd）归纳：白话总览／一句话定调／核心论断／命盘依据／经典出处（lib/seo/knowledge.ts）
  *
  * SEO 要点：
  *  - title 含主关键词（如"紫微入命宫·倪海厦体系详解"）
@@ -19,31 +19,51 @@ import {
   ALL_STARS,
   ALL_TOPICS,
   getKnowledge,
-  getAllKnowledgeRoutes,
+  hasKnowledge,
+  type Gender,
   STAR_BRIEF_SEO,
   STAR_TO_SLUG,
   SLUG_TO_STAR,
 } from '@/lib/seo/knowledge';
 import { SITE_URL } from '@/lib/site';
+import { TOPIC_PALACE_NAME } from '@/lib/ziwei/db-analysis';
+import type { Brightness } from '@/lib/seo/knowledge-extract';
 
-// 允许动态参数：如果某个 star/topic 组合不在 generateStaticParams 列表中
-// 也允许运行时按需渲染，避免中文 URL 编码问题导致 404
-export const dynamicParams = false;
-
-export async function generateStaticParams() {
-  const routes = getAllKnowledgeRoutes();
-  // URL 用拼音 slug 替代中文，避开 Vercel/CDN 中文路由边界问题
-  return routes.map(r => ({ star: r.slug, topic: r.topic }));
+/** ?g=female 才是女命；重複參數取第一個 */
+function genderOf(g: string | string[] | undefined): Gender {
+  return (Array.isArray(g) ? g[0] : g) === 'female' ? 'female' : 'male';
 }
 
-export async function generateMetadata({ params }: { params: Promise<{ star: string; topic: string }> }) {
+const BRIGHTNESS_LABEL: Record<Brightness, string> = { bright: '庙旺', normal: '平', dim: '落陷' };
+
+/** 断语文字：保留换行，**粗体** 转成 strong */
+function RichText({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('\n').map((line, i) => (
+        <span key={i}>
+          {line.split(/\*\*(.+?)\*\*/).map((part, j) => (j % 2 ? <strong key={j}>{part}</strong> : part))}
+          {'\n'}
+        </span>
+      ))}
+    </>
+  );
+}
+
+// 内容要读压缩断语库（server 端 SQLite），按请求渲染；归纳结果在进程内快取
+export const dynamic = 'force-dynamic';
+
+export async function generateMetadata({
+  params, searchParams,
+}: { params: Promise<{ star: string; topic: string }>; searchParams: Promise<{ g?: string | string[] }> }) {
   const { star: slug, topic } = await params;
   const star = SLUG_TO_STAR[slug];
   if (!star) return {};
-  const data = getKnowledge(star, topic as TopicKey);
+  const gender = genderOf((await searchParams).g);
+  const data = getKnowledge(star, topic as TopicKey, gender);
   if (!data.exists) return {};
 
-  const title = `${star}入${data.palaceName}宫 · ${data.topicLabel} · 倪海厦体系详解`;
+  const title = `${star}入${data.palaceName}宫 · ${data.topicLabel}（${gender === 'female' ? '女命' : '男命'}） · 倪海厦体系详解`;
   const description = data.parsed.dingdiao
     || `${star}入${data.palaceName}宫的紫微斗数解读 — 基于倪海厦《天纪》体系与古籍《紫微斗数全集》《骨髓赋》。`;
 
@@ -67,17 +87,23 @@ export async function generateMetadata({ params }: { params: Promise<{ star: str
   };
 }
 
-export default async function KnowledgePage({ params }: { params: Promise<{ star: string; topic: string }> }) {
+export default async function KnowledgePage({
+  params, searchParams,
+}: { params: Promise<{ star: string; topic: string }>; searchParams: Promise<{ g?: string | string[] }> }) {
   const { star: slug, topic } = await params;
   const star = SLUG_TO_STAR[slug];
   if (!star) notFound();
-  const data = getKnowledge(star, topic as TopicKey);
+  // 论断常分男命／女命（如夫妻宫），以 ?g=female 切换，默认男命
+  const gender = genderOf((await searchParams).g);
+  const gq = gender === 'female' ? '?g=female' : '';
+  const data = getKnowledge(star, topic as TopicKey, gender);
   if (!data.exists) notFound();
 
-  // 同主星其他 topic
-  const otherTopicsForStar = ALL_TOPICS.filter(t => t !== topic && getKnowledge(star, t).exists);
-  // 同 topic 其他主星
-  const otherStarsForTopic = ALL_STARS.filter(s => s !== star && getKnowledge(s, topic as TopicKey).exists);
+  // 同主星其他 topic、同 topic 其他主星（只看样本索引，不读资料库）
+  const otherTopicsForStar = ALL_TOPICS.filter(t => t !== topic && hasKnowledge(star, t));
+  const otherStarsForTopic = ALL_STARS.filter(s => s !== star && hasKnowledge(s, topic as TopicKey));
+  const sampleNote = (Object.entries(data.parsed.samples) as [Brightness, number][])
+    .map(([b, n]) => `${BRIGHTNESS_LABEL[b]} ${n}`).join('、');
 
   // JSON-LD
   const jsonLd = {
@@ -141,9 +167,34 @@ export default async function KnowledgePage({ params }: { params: Promise<{ star
               {STAR_BRIEF_SEO[star]}
             </p>
           )}
+          <nav aria-label="男命／女命" style={{ display: 'flex', gap: '8px', marginTop: '18px' }}>
+            {(['male', 'female'] as const).map(g => (
+              <Link
+                key={g}
+                href={`/knowledge/${slug}/${topic}${g === 'female' ? '?g=female' : ''}`}
+                aria-current={gender === g ? 'page' : undefined}
+                style={{
+                  fontSize: '13px', padding: '6px 16px', borderRadius: '999px', textDecoration: 'none',
+                  border: `1px solid ${gender === g ? 'rgba(184,146,42,0.6)' : 'rgba(184,146,42,0.2)'}`,
+                  background: gender === g ? 'rgba(184,146,42,0.14)' : 'transparent',
+                  color: gender === g ? 'var(--ac)' : 'var(--tx-2)',
+                }}
+              >
+                {g === 'male' ? '男命' : '女命'}
+              </Link>
+            ))}
+          </nav>
         </header>
 
-        {/* 内容 4 段 */}
+        {/* 内容：白话总览＋4 段论断＋亮度差异 */}
+        {data.parsed.zonglan && (
+          <Section title={data.parsed.zonglanBucket ? `白话总览（以${BRIGHTNESS_LABEL[data.parsed.zonglanBucket]}为例）` : '白话总览'}>
+            <div style={{ fontSize: '15px', color: 'var(--tx-0)', lineHeight: 2, letterSpacing: '0.02em', whiteSpace: 'pre-wrap' }}>
+              <RichText text={data.parsed.zonglan} />
+            </div>
+          </Section>
+        )}
+
         {data.parsed.dingdiao && (
           <Section title="一句话定调" gradient>
             <p style={{ fontSize: '17px', color: 'var(--tx-0)', lineHeight: 1.9, fontWeight: 500, letterSpacing: '0.04em' }}>
@@ -155,7 +206,7 @@ export default async function KnowledgePage({ params }: { params: Promise<{ star
         {data.parsed.lundian && (
           <Section title="核心论断">
             <div style={{ fontSize: '15px', color: 'var(--tx-0)', lineHeight: 2, letterSpacing: '0.02em', whiteSpace: 'pre-wrap' }}>
-              {data.parsed.lundian}
+              <RichText text={data.parsed.lundian} />
             </div>
           </Section>
         )}
@@ -163,7 +214,7 @@ export default async function KnowledgePage({ params }: { params: Promise<{ star
         {data.parsed.yiju && (
           <Section title="命盘依据">
             <div style={{ fontSize: '14px', color: 'var(--tx-0)', lineHeight: 2, letterSpacing: '0.02em', whiteSpace: 'pre-wrap' }}>
-              {data.parsed.yiju}
+              <RichText text={data.parsed.yiju} />
             </div>
           </Section>
         )}
@@ -171,10 +222,25 @@ export default async function KnowledgePage({ params }: { params: Promise<{ star
         {data.parsed.chuchu && (
           <Section title="经典出处" minimal>
             <div style={{ fontSize: '13px', color: 'var(--tx-2)', lineHeight: 2, letterSpacing: '0.02em', whiteSpace: 'pre-wrap' }}>
-              {data.parsed.chuchu}
+              <RichText text={data.parsed.chuchu} />
             </div>
           </Section>
         )}
+
+        {Object.keys(data.parsed.brightness).length > 0 && (
+          <Section title="亮度差异" minimal>
+            {(Object.entries(data.parsed.brightness) as [Brightness, string[]][]).map(([b, lines]) => (
+              <div key={b} style={{ fontSize: '14px', color: 'var(--tx-0)', lineHeight: 2, marginBottom: '10px' }}>
+                <strong style={{ color: 'var(--ac)' }}>{BRIGHTNESS_LABEL[b]}：</strong>
+                {lines.map((l, i) => <div key={i}><RichText text={l} /></div>)}
+              </div>
+            ))}
+          </Section>
+        )}
+
+        <p style={{ fontSize: '11px', color: 'var(--tx-3)', lineHeight: 1.8, margin: '8px 0 0' }}>
+          本页由压缩断语库中 {star} 独坐{data.palaceName}宫的{gender === 'female' ? '女命' : '男命'} {Object.values(data.parsed.samples).reduce((a, b) => a + (b ?? 0), 0)} 张命盘（{sampleNote}）归纳共同论断而成；个别命盘专属的推导与格局不列入。
+        </p>
 
         {/* CTA */}
         <div style={{
@@ -211,11 +277,11 @@ export default async function KnowledgePage({ params }: { params: Promise<{ star
         <Section title={`${star}星的其他宫位解读`} minimal>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
             {otherTopicsForStar.map(t => {
-              const d = getKnowledge(star, t);
+              const d = { palaceName: TOPIC_PALACE_NAME[t] };
               return (
                 <Link
                   key={t}
-                  href={`/knowledge/${slug}/${t}`}
+                  href={`/knowledge/${slug}/${t}${gq}`}
                   style={{
                     fontSize: '12px',
                     padding: '6px 12px',
@@ -239,7 +305,7 @@ export default async function KnowledgePage({ params }: { params: Promise<{ star
             {otherStarsForTopic.slice(0, 13).map(s => (
               <Link
                 key={s}
-                href={`/knowledge/${STAR_TO_SLUG[s]}/${topic}`}
+                href={`/knowledge/${STAR_TO_SLUG[s]}/${topic}${gq}`}
                 style={{
                   fontSize: '12px',
                   padding: '6px 12px',
@@ -302,7 +368,7 @@ function Section({ title, children, gradient, minimal }: { title: string; childr
       <div style={{
         background: gradient
           ? 'linear-gradient(135deg, rgba(212,169,72,0.12) 0%, rgba(184,146,42,0.04) 100%)'
-          : 'white',
+          : 'var(--bg-card)', // 跟著深／淺色主題（原本寫死白底，深色主題下淺色字看不到）
         border: '1px solid rgba(184,146,42,0.15)',
         borderRadius: '10px',
         padding: minimal ? '14px 18px' : '20px 22px',

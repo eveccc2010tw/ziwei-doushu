@@ -1,13 +1,16 @@
 /**
- * SEO 知识页 — 数据 helper
+ * 知识页数据 helper
  *
- * 14 主星 × 13 topic = 182 个独立 SEO URL
- * 每页都是 STAR_DB 中对应字段的 4 段 markers（一句话定调/核心论断/命盘依据/经典出处）
+ * 14 主星 × 13 topic = 182 个页面。论断来自压缩断语库（data/ziwei-v4.sqlite，SQLite＋Zstd）：
+ * 每个「主星 × 领域」取 lib/seo/knowledge-samples.json 列出的样本盘（该宫只有这颗主星），
+ * 读出该领域断语后归纳共同段落（lib/seo/knowledge-extract.ts）。男命／女命分开归纳（样本成对）。结果在进程内快取。
+ * 样本索引由 scripts/knowledge/build-sample-index.ts 产生。
  */
-
-import { STAR_DB } from '@/lib/ziwei/db-analysis';
 import type { TopicKey } from '@/lib/ziwei/db-analysis';
 import { TOPIC_PALACE_NAME, TOPIC_LABEL } from '@/lib/ziwei/db-analysis';
+import { lookupFromSqlite, parseDatasetKey } from '@/lib/ziwei-dataset';
+import { extractKnowledge, type Brightness, type KnowledgeSample, type KnowledgeSections } from './knowledge-extract';
+import SAMPLE_INDEX from './knowledge-samples.json';
 
 export const ALL_STARS = [
   '紫微', '天机', '太阳', '武曲', '天同', '廉贞', '天府',
@@ -41,103 +44,65 @@ export const ALL_TOPICS: TopicKey[] = [
   'family', 'children', 'move', 'friends', 'home', 'spirit', 'parents',
 ];
 
-interface StarContent {
-  mingGong: string;
-  personality: string;
-  xiongDi?: string;
-  fuQi: string;
-  ziNv?: string;
-  caiBo: string;
-  jiE: string;
-  qianYi?: string;
-  jiaoYou?: string;
-  guanLu: string;
-  tianZhai?: string;
-  fuDe?: string;
-  fuMu?: string;
-}
+const SAMPLES = SAMPLE_INDEX as unknown as Record<string, Array<[string, string]>>;
+/** 样本（男女合计）少于这个数就不出页面；男命／女命各自至少 2 张才归纳 */
+const MIN_SAMPLES = 4;
 
-const TOPIC_TO_FIELD: Record<TopicKey, keyof StarContent> = {
-  overview:    'mingGong',
-  personality: 'personality',
-  love:        'fuQi',
-  career:      'guanLu',
-  wealth:      'caiBo',
-  health:      'jiE',
-  family:      'xiongDi' as keyof StarContent,
-  children:    'ziNv' as keyof StarContent,
-  move:        'qianYi' as keyof StarContent,
-  friends:     'jiaoYou' as keyof StarContent,
-  home:        'tianZhai' as keyof StarContent,
-  spirit:      'fuDe' as keyof StarContent,
-  parents:     'fuMu' as keyof StarContent,
-};
-
-interface ParsedContent {
-  dingdiao: string;
-  lundian: string;
-  yiju: string;
-  chuchu: string;
-  raw: string;
-  hasMarkers: boolean;
-}
-
-function parseStarContent(content: string): ParsedContent {
-  const out: ParsedContent = { dingdiao: '', lundian: '', yiju: '', chuchu: '', raw: content, hasMarkers: false };
-  if (!content) return out;
-  if (!content.includes('**【一句话定调】**') && !content.includes('**【核心论断】**')) {
-    out.lundian = content;
-    return out;
-  }
-  out.hasMarkers = true;
-  const re = /\*\*【([^】]+)】\*\*/g;
-  const parts: { name: string; markerEnd: number; start: number }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(content)) !== null) {
-    parts.push({ name: m[1], start: m.index, markerEnd: m.index + m[0].length });
-  }
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
-    const end = i + 1 < parts.length ? parts[i + 1].start : content.length;
-    const text = content.slice(p.markerEnd, end).trim();
-    if (p.name === '一句话定调') out.dingdiao = text;
-    else if (p.name === '核心论断') out.lundian = text;
-    else if (p.name === '命盘依据') out.yiju = text;
-    else if (p.name === '经典出处') out.chuchu = text;
-  }
-  return out;
-}
+export type Gender = 'male' | 'female';
 
 export interface KnowledgeData {
   star: string;
   topic: TopicKey;
+  gender: Gender;
   topicLabel: string;
   palaceName: string;
-  parsed: ParsedContent;
+  parsed: KnowledgeSections;
   exists: boolean;
 }
 
-export function getKnowledge(star: string, topic: TopicKey): KnowledgeData {
-  const profile = STAR_DB[star] as StarContent | undefined;
-  const field = TOPIC_TO_FIELD[topic];
-  const content = profile && field ? (profile[field] as string | undefined) ?? '' : '';
-  return {
-    star,
-    topic,
-    topicLabel: TOPIC_LABEL[topic],
-    palaceName: TOPIC_PALACE_NAME[topic],
-    parsed: parseStarContent(content),
-    exists: Boolean(content),
-  };
+/** 有没有这一页（只看样本索引，不读资料库；列表、sitemap 用） */
+export function hasKnowledge(star: string, topic: TopicKey): boolean {
+  return (SAMPLES[`${star}|${topic}`]?.length ?? 0) >= MIN_SAMPLES;
 }
 
-/** 生成所有 14×13 组合（用于 generateStaticParams） */
+const cache = new Map<string, KnowledgeData>();
+
+export function getKnowledge(star: string, topic: TopicKey, gender: Gender = 'male'): KnowledgeData {
+  const key = `${star}|${topic}`;
+  const hit = cache.get(`${key}|${gender}`);
+  if (hit) return hit;
+  const samples: KnowledgeSample[] = [];
+  // 只用同性別的樣本（論斷常分男命／女命，不混合）
+  const mine = hasKnowledge(star, topic) ? SAMPLES[key].filter(([k]) => k.endsWith(`-${gender}`)) : [];
+  for (const [k, bucket] of mine) {
+    const parts = parseDatasetKey(k);
+    let text: string | undefined;
+    try {
+      text = parts ? lookupFromSqlite(parts)?.c?.[topic] : undefined;
+    } catch { /* 資料庫讀取異常：當作這張樣本讀不到 */ }
+    if (text) samples.push({ text, bucket: bucket as Brightness });
+  }
+  const parsed = extractKnowledge(samples, undefined, star);
+  const data: KnowledgeData = {
+    star,
+    topic,
+    gender,
+    topicLabel: TOPIC_LABEL[topic],
+    palaceName: TOPIC_PALACE_NAME[topic],
+    parsed,
+    exists: samples.length >= 2 && Boolean(parsed.dingdiao || parsed.lundian),
+  };
+  // 样本要全部读到才快取；资料库暂时读不到或只读到部分时不快取，下次请求再试
+  if (mine.length && samples.length === mine.length) cache.set(`${key}|${gender}`, data);
+  return data;
+}
+
+/** 所有有样本的 14×13 组合（sitemap 用） */
 export function getAllKnowledgeRoutes() {
   const routes: { star: string; slug: string; topic: TopicKey }[] = [];
   for (const star of ALL_STARS) {
     for (const topic of ALL_TOPICS) {
-      const data = getKnowledge(star, topic);
-      if (data.exists) routes.push({ star, slug: STAR_TO_SLUG[star], topic });
+      if (hasKnowledge(star, topic)) routes.push({ star, slug: STAR_TO_SLUG[star], topic });
     }
   }
   return routes;

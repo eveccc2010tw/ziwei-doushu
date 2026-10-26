@@ -4,8 +4,8 @@
  */
 
 import Link from 'next/link';
-import { ALL_STARS, ALL_TOPICS, getKnowledge, STAR_BRIEF_SEO, STAR_TO_SLUG } from '@/lib/seo/knowledge';
-import { TOPIC_LABEL } from '@/lib/ziwei/db-analysis';
+import { ALL_STARS, ALL_TOPICS, hasKnowledge, STAR_BRIEF_SEO, STAR_TO_SLUG } from '@/lib/seo/knowledge';
+import { TOPIC_LABEL, TOPIC_PALACE_NAME } from '@/lib/ziwei/db-analysis';
 
 export const metadata = {
   title: '紫微斗数知识库 · 14 主星 × 13 宫位 · 倪海厦正宗体系',
@@ -99,8 +99,7 @@ export default function KnowledgeHomePage() {
               </p>
               <div className="flex flex-wrap gap-2">
                 {ALL_TOPICS.map(t => {
-                  const k = getKnowledge(star, t);
-                  if (!k.exists) return null;
+                  if (!hasKnowledge(star, t)) return null;
                   return (
                     <Link
                       key={t}
@@ -115,7 +114,7 @@ export default function KnowledgeHomePage() {
                         textDecoration: 'none',
                       }}
                     >
-                      入{k.palaceName} · {TOPIC_LABEL[t]}
+                      入{TOPIC_PALACE_NAME[t]} · {TOPIC_LABEL[t]}
                     </Link>
                   );
                 })}
