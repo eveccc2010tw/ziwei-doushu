@@ -80,8 +80,8 @@ export async function generateMetadata({
       canonical: `${SITE_URL}/knowledge/${slug}/${topic}`,
     },
     keywords: [
-      '紫微斗数', '倪海厦', star, data.palaceName, data.topicLabel,
-      `${star}${data.palaceName}`, `${star}入${data.palaceName}`,
+      '紫微斗数', '倪海厦', star, TOPIC_PALACE_NAME[topic as TopicKey], data.topicLabel,
+      `${star}${TOPIC_PALACE_NAME[topic as TopicKey]}`, `${star}入${TOPIC_PALACE_NAME[topic as TopicKey]}`,
       `紫微斗数 ${star}`, '倪海厦紫微斗数', '紫微斗数全集',
     ],
   };
@@ -121,7 +121,7 @@ export default async function KnowledgePage({
     dateModified: '2026-04-28',
     mainEntityOfPage: `${SITE_URL}/knowledge/${slug}/${topic}`,
     articleSection: '紫微斗数 · 倪海厦体系',
-    keywords: [`紫微斗数`, star, data.palaceName, data.topicLabel].join(', '),
+    keywords: [`紫微斗数`, star, TOPIC_PALACE_NAME[topic as TopicKey], data.topicLabel].join(', '),
   };
 
   return (
@@ -316,7 +316,7 @@ export default async function KnowledgePage({
                   textDecoration: 'none',
                 }}
               >
-                {s}入{data.palaceName}
+                {s}入{TOPIC_PALACE_NAME[topic as TopicKey]}
               </Link>
             ))}
           </div>

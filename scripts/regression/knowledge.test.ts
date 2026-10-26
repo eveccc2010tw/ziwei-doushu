@@ -88,7 +88,7 @@ const ms = performance.now() - t0;
 check(exists === 364, `182 頁 × 男女都抽得出定調與論斷（${exists}）`);
 check(leaks.length === 0, `無該盤專屬內容外洩：${leaks.slice(0, 5)}`);
 check(getKnowledge('天府', 'overview').parsed.dingdiao.startsWith('天府是南斗第一星'), '天府坐命定調正確');
-check(getKnowledge('武曲', 'wealth').palaceName === '财帛', '領域對應宮位');
+check(getKnowledge('武曲', 'wealth').palaceName === '财帛' && getKnowledge('天府', 'overview').palaceName === '命', '領域對應宮位（宮名不帶「宫」，避免標題變成「命宫宫」）');
 check(getKnowledge('紫微', 'spirit', 'female').parsed.lundian.includes('女命') && !getKnowledge('紫微', 'spirit', 'male').parsed.lundian.includes('女命'),
   '男命／女命分開歸納（紫微坐福德）');
 check(!/化忌（阻碍）则|化禄（进财）则/.test(getKnowledge('天机', 'home').parsed.lundian) && getKnowledge('天机', 'home').parsed.lundian.includes('退祖新创置'),

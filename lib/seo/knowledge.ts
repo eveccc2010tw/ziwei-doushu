@@ -88,7 +88,7 @@ export function getKnowledge(star: string, topic: TopicKey, gender: Gender = 'ma
     topic,
     gender,
     topicLabel: TOPIC_LABEL[topic],
-    palaceName: TOPIC_PALACE_NAME[topic],
+    palaceName: TOPIC_PALACE_NAME[topic].replace(/宫$/, ''), // 页面模板会自己加「宫」（命宫原本带宫字，会变成「命宫宫」）
     parsed,
     exists: samples.length >= 2 && Boolean(parsed.dingdiao || parsed.lundian),
   };
